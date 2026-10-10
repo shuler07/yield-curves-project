@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IRRBB: Стресс-сценарии Базеля</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+    <style>
+        body {
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f8f9fa;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        h1, h2 {
+            color: #2c3e50;
+        }
+        .formulas {
+            background: #eef2f5;
+            padding: 20px;
+            border-radius: 6px;
+            margin-bottom: 30px;
+            overflow-x: auto;
+        }
+        .chart-container {
+            position: relative;
+            height: 500px;
+            width: 100%;
+        }
+        .controls {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f1f8ff;
+            border-left: 4px solid #0056b3;
+            border-radius: 4px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            align-items: center;
+        }
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        input[type="range"] {
+            width: 250px;
+        }
+        select {
+            padding: 6px 10px;
+            font-size: 1em;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        .shock-value {
+            font-weight: bold;
+            color: #d32f2f;
+            font-size: 1.1em;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Визуализация 6 стресс-сценариев IRRBB (BCBS d368)</h1>
+    
+    <div class="formulas">
+        <h2>Математические формулы сдвигов</h2>
+        <p>В основе непараллельных шоков лежит функция экспоненциального затухания, зависящая от срока \( t \) (в годах):</p>
+        <p>\( S(t) = e^{-\frac{t}{4}} \)</p>
+        <hr>
+        <p><strong>1. Parallel Up (Параллельный сдвиг вверх):</strong> \( \Delta R_{up}(t) = +\bar{R}_{shock} \)</p>
+        <p><strong>2. Parallel Down (Параллельный сдвиг вниз):</strong> \( \Delta R_{down}(t) = -\bar{R}_{shock} \)</p>
+        <p><strong>3. Short Rates Up (Рост коротких ставок):</strong> \( \Delta R_{short\_up}(t) = +\bar{R}_{shock} \cdot S(t) \)</p>
+        <p><strong>4. Short Rates Down (Падение коротких ставок):</strong> \( \Delta R_{short\_down}(t) = -\bar{R}_{shock} \cdot S(t) \)</p>
+        <p><strong>5. Steepener (Укручение кривой):</strong> \( \Delta R_{steep}(t) = -0.65 \cdot \bar{R}_{shock} \cdot S(t) + 0.9 \cdot \bar{R}_{shock} \cdot (1 - S(t)) \)</p>
+        <p><strong>6. Flattener (Уплощение кривой):</strong> \( \Delta R_{flat}(t) = +0.8 \cdot \bar{R}_{shock} \cdot S(t) - 0.6 \cdot \bar{R}_{shock} \cdot (1 - S(t)) \)</p>
+    </div>
+
+    <div class="controls">
+        <div class="control-group">
+            <label for="scenarioSelector"><strong>Отображаемый сценарий:</strong></label>
+            <select id="scenarioSelector">
+                <option value="all">Все сценарии</option>
+                <option value="1">1. Parallel Up</option>
+                <option value="2">2. Parallel Down</option>
+                <option value="3">3. Short Rates Up</option>
+                <option value="4">4. Short Rates Down</option>
+                <option value="5">5. Steepener</option>
+                <option value="6">6. Flattener</option>
+            </select>
+        </div>
+
+        <div class="control-group">
+            <label for="shockSlider"><strong>Базовый шок (\( \bar{R}_{shock} \)):</strong></label>
+            <input type="range" id="shockSlider" min="100" max="800" step="50" value="400">
+            <span class="shock-value"><span id="shockDisplay">400</span> б.п.</span>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <canvas id="yieldCurveChart"></canvas>
+    </div>
+</div>
+
+<script>
+    const tenors = [0.25, 0.5, 0.75, 1, 2, 3, 4, 5, 7, 10, 15, 20];
+    const baseCurve = [11.88, 12.61, 13.23, 13.76, 15.21, 15.97, 16.36, 16.57, 16.75, 16.85, 16.90, 16.92];
+    const S = (t) => Math.exp(-t / 4.0);
+
+    function calculateScenarios(shock_bp) {
+        const shock = shock_bp / 100.0;
+        let datasets = {
+            parallelUp: [], parallelDown: [],
+            shortUp: [], shortDown: [],
+            steepener: [], flattener: []
+        };
+
+        for (let i = 0; i < tenors.length; i++) {
+            let t = tenors[i];
+            let base = baseCurve[i];
+            let st = S(t);
+
+            datasets.parallelUp.push(base + shock);
+            datasets.parallelDown.push(Math.max(0, base - shock));
+            datasets.shortUp.push(base + shock * st);
+            datasets.shortDown.push(Math.max(0, base - shock * st));
+            datasets.steepener.push(Math.max(0, base - 0.65 * shock * st + 0.9 * shock * (1 - st)));
+            datasets.flattener.push(Math.max(0, base + 0.8 * shock * st - 0.6 * shock * (1 - st)));
+        }
+        return datasets;
+    }
+
+    const ctx = document.getElementById('yieldCurveChart').getContext('2d');
+    const lineOptions = { borderWidth: 2, tension: 0.4, pointRadius: 3 };
+
+    let chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: tenors.map(t => t + ' лет'),
+            datasets: [
+                {
+                    label: 'Базовая кривая',
+                    data: baseCurve,
+                    borderColor: '#2c3e50',
+                    backgroundColor: '#2c3e50',
+                    borderWidth: 4,
+                    borderDash: [5, 5],
+                    tension: 0.4,
+                    pointRadius: 5,
+                    order: 1
+                },
+                { label: 'Parallel Up', borderColor: '#d32f2f', ...lineOptions },
+                { label: 'Parallel Down', borderColor: '#1976d2', ...lineOptions },
+                { label: 'Short Rates Up', borderColor: '#f57c00', ...lineOptions },
+                { label: 'Short Rates Down', borderColor: '#388e3c', ...lineOptions },
+                { label: 'Steepener', borderColor: '#8e24aa', ...lineOptions },
+                { label: 'Flattener', borderColor: '#0097a7', ...lineOptions }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            return context.dataset.label + ': ' + context.parsed.y.toFixed(2) + '%';
+                        }
+                    }
+                },
+                legend: {
+                    position: 'right',
+                    onClick: null // Отключаем стандартное скрытие по клику на легенду
+                }
+            },
+            scales: {
+                y: { title: { display: true, text: 'Доходность (% годовых)' } },
+                x: { title: { display: true, text: 'Срок до погашения (Tenor)' } }
+            }
+        }
+    });
+
+    function updateChartData(shock_bp) {
+        let newData = calculateScenarios(shock_bp);
+        chart.data.datasets[1].data = newData.parallelUp;
+        chart.data.datasets[2].data = newData.parallelDown;
+        chart.data.datasets[3].data = newData.shortUp;
+        chart.data.datasets[4].data = newData.shortDown;
+        chart.data.datasets[5].data = newData.steepener;
+        chart.data.datasets[6].data = newData.flattener;
+        chart.update();
+    }
+
+    function updateVisibility() {
+        const selectedValue = document.getElementById('scenarioSelector').value;
+        // Базовая кривая (индекс 0) всегда остается видимой
+        for (let i = 1; i <= 6; i++) {
+            if (selectedValue === 'all' || parseInt(selectedValue) === i) {
+                chart.setDatasetVisibility(i, true);
+            } else {
+                chart.setDatasetVisibility(i, false);
+            }
+        }
+        chart.update();
+    }
+
+    const slider = document.getElementById('shockSlider');
+    const display = document.getElementById('shockDisplay');
+    const selector = document.getElementById('scenarioSelector');
+
+    slider.addEventListener('input', function() {
+        display.textContent = this.value;
+        updateChartData(this.value);
+    });
+
+    selector.addEventListener('change', updateVisibility);
+
+    // Первичная отрисовка
+    updateChartData(slider.value);
+    updateVisibility();
+</script>
+
+</body>
+</html>
