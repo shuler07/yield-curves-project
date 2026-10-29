@@ -75,4 +75,5 @@ coverage.xml
 # Другие
 .DS_Store
 Thumbs.db
-
+docs/database/README.md
+docs/sprint-2.md
