@@ -15,14 +15,14 @@ from src.etl.calculations import (
     discount_factor,
     prepare_base_curve,
 )
-from src.etl.common import TERMS, DataValidationError
+from src.etl.common import SOURCE_TERMS, TARGET_TERMS, DataValidationError
 
 
 def snapshot(rates=None):
     return RawSnapshot(
         date(2026, 10, 30),
         time(18, 54, 59),
-        rates if rates is not None else {term: Decimal("0.1") for term in TERMS},
+        rates if rates is not None else {term: Decimal("0.1") for term in SOURCE_TERMS},
     )
 
 
@@ -73,7 +73,7 @@ def test_restore_rates_and_flags_using_original_neighbouring_points_only():
     before = dict(rates)
     points = {point.tenor: point for point in prepare_base_curve(snapshot(rates))}
     assert rates == before
-    assert set(points) == set(TERMS)
+    assert set(points) == set(TARGET_TERMS)
     assert points[Decimal(2)].yield_rate == Decimal("0.12")
     assert points[Decimal(2)].is_interpolated
     assert not points[Decimal(2)].is_extrapolated
@@ -85,6 +85,31 @@ def test_restore_rates_and_flags_using_original_neighbouring_points_only():
     assert not points[Decimal(1)].is_extrapolated
     assert not any(point.is_deleted for point in points.values())
     assert points[Decimal(5)].yield_rate == Decimal("0.14")
+
+
+def test_target_grid_restores_seven_extra_tenors_from_source_observations():
+    from src.etl.common import DAY_TENOR, MONTH_TENOR
+
+    assert len(SOURCE_TERMS) == 12
+    assert len(TARGET_TERMS) == len(set(TARGET_TERMS)) == 19
+    assert tuple(sorted(TARGET_TERMS)) == TARGET_TERMS
+    # A straight line lets us check the additional points independently.
+    rates = {tenor: Decimal("0.1") + Decimal("0.002") * tenor for tenor in SOURCE_TERMS}
+    result = calculate_snapshot(snapshot(rates))
+    points = {point.tenor: point for point in result.base_points}
+    for tenor in TARGET_TERMS:
+        point = points[tenor]
+        assert point.yield_rate == Decimal("0.1") + Decimal("0.002") * tenor
+        assert point.is_interpolated == (tenor in map(Decimal, ("1.5", "6", "8", "9")))
+        assert point.is_extrapolated == (tenor in (DAY_TENOR, MONTH_TENOR, Decimal(30)))
+        assert point.discount_factor == discount_factor(point.yield_rate, tenor)
+        assert tenor == tenor.quantize(Decimal("0.000001"))
+    assert points[Decimal("1.5")].yield_rate == Decimal("0.103")
+    assert points[Decimal(30)].yield_rate == Decimal("0.16")
+    assert all(
+        tuple(point.tenor for point in curve.points) == TARGET_TERMS
+        for curve in result.scenarios
+    )
 
 
 def test_zero_is_an_observation_and_negative_extrapolation_is_preserved():
@@ -101,7 +126,7 @@ def test_zero_is_an_observation_and_negative_extrapolation_is_preserved():
 
 
 @pytest.mark.parametrize(
-    "rates", [{}, {Decimal(1): Decimal("0.1")}, {term: None for term in TERMS}]
+    "rates", [{}, {Decimal(1): Decimal("0.1")}, {term: None for term in SOURCE_TERMS}]
 )
 def test_less_than_two_observations_fails_with_snapshot_context(rates):
     with pytest.raises(DataValidationError, match="2026-10-30.*две"):
@@ -123,8 +148,8 @@ def test_invalid_observed_points_are_not_interpolated(rates):
 def test_six_scenarios_and_their_own_discount_factors():
     result = calculate_snapshot(snapshot())
     assert tuple(curve.scenario for curve in result.scenarios) == SCENARIOS
-    assert len(result.base_points) == 12
-    assert all(len(curve.points) == 12 for curve in result.scenarios)
+    assert len(result.base_points) == 19
+    assert all(len(curve.points) == 19 for curve in result.scenarios)
     point = {
         curve.scenario: next(point for point in curve.points if point.tenor == 1)
         for curve in result.scenarios
@@ -168,7 +193,9 @@ def test_independent_short_long_amplitudes():
 
 
 def test_floor_is_applied_to_all_scenarios_but_not_baseline():
-    result = calculate_snapshot(snapshot({term: Decimal("-0.5") for term in TERMS}))
+    result = calculate_snapshot(
+        snapshot({term: Decimal("-0.5") for term in SOURCE_TERMS})
+    )
     assert all(point.yield_rate == Decimal("-0.5") for point in result.base_points)
     assert all(
         point.stressed_yield == 0 and point.discount_factor == 1
@@ -176,7 +203,7 @@ def test_floor_is_applied_to_all_scenarios_but_not_baseline():
         for point in curve.points
     )
     unfloored = calculate_snapshot(
-        snapshot({term: Decimal("-0.5") for term in TERMS}),
+        snapshot({term: Decimal("-0.5") for term in SOURCE_TERMS}),
         ScenarioParameters(floor=None),
     )
     assert all(

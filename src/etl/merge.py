@@ -16,7 +16,7 @@ from src.etl.common import (
     MISSING_RATE,
     MISSING_RATE_TOKENS,
     OUTPUT_NAME,
-    TERMS,
+    SOURCE_TERMS,
     DataValidationError,
     DateRange,
     NoDataError,
@@ -86,7 +86,7 @@ def _parse_term(column: str) -> Decimal:
         term = Decimal(column.removeprefix("period_"))
     except InvalidOperation as exc:
         raise ValueError(f"некорректный срок {column!r}") from exc
-    if not term.is_finite() or term not in TERMS:
+    if not term.is_finite() or term not in SOURCE_TERMS:
         raise ValueError(f"неожиданный срок {column!r}")
     return term
 
@@ -156,7 +156,7 @@ def extract_and_merge(
             _read_rows(source, content, dates, merged)
     if not merged:
         raise NoDataError(f"Нет котировок за {dates.start} — {dates.end}")
-    expected = set(TERMS)
+    expected = set(SOURCE_TERMS)
     incomplete = tuple(
         IncompleteSnapshot(
             tradedate, tradetime, tuple(sorted(expected - values.keys()))
@@ -168,7 +168,7 @@ def extract_and_merge(
     def write_rows(stream):
         writer = csv.writer(stream, delimiter=";", lineterminator="\n")
         writer.writerow(
-            ["tradedate", "tradetime", *(f"period_{term}" for term in TERMS)]
+            ["tradedate", "tradetime", *(f"period_{term}" for term in SOURCE_TERMS)]
         )
         for (tradedate, tradetime), values in sorted(merged.items()):
             writer.writerow(
@@ -177,7 +177,7 @@ def extract_and_merge(
                     tradetime.strftime("%H:%M:%S"),
                     *(
                         format(values[term], "f") if term in values else MISSING_RATE
-                        for term in TERMS
+                        for term in SOURCE_TERMS
                     ),
                 ]
             )
@@ -199,7 +199,7 @@ def merge_run(run_dir: Path) -> MergeResult:
 
 def print_result(result: MergeResult) -> None:
     click.echo(f"CSV: {result.output_file}")
-    click.echo(f"Снимков: {result.snapshot_count}; колонок сроков: {len(TERMS)}")
+    click.echo(f"Снимков: {result.snapshot_count}; колонок сроков: {len(SOURCE_TERMS)}")
     for snapshot in result.incomplete_snapshots:
         click.echo(
             f"Пропуски {snapshot.curve_date} {snapshot.quote_time}: "

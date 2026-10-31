@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from src.etl.calculations import RawSnapshot, ScenarioParameters, calculate_snapshot
-from src.etl.common import TERMS
+from src.etl.common import SOURCE_TERMS
 
 
 @pytest.mark.parametrize(
@@ -38,7 +38,7 @@ process.stdout.write(result);
     raw = RawSnapshot(
         date(2026, 10, 30),
         time(18),
-        {term: Decimal(str(base_percent)) / 100 for term in TERMS},
+        {term: Decimal(str(base_percent)) / 100 for term in SOURCE_TERMS},
     )
     params = ScenarioParameters(
         parallel_bps=shock_bps,
@@ -59,7 +59,11 @@ process.stdout.write(result);
         strict=True,
     ):
         assert html_rates[key] == pytest.approx(
-            [float(point.stressed_yield * 100) for point in curve.points],
+            [
+                float(point.stressed_yield * 100)
+                for point in curve.points
+                if point.tenor in SOURCE_TERMS
+            ],
             rel=1e-12,
             abs=1e-12,
         )

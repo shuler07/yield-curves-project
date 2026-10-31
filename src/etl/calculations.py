@@ -15,7 +15,7 @@ from datetime import date, time
 from decimal import Decimal, DecimalException, InvalidOperation, localcontext
 from uuid import UUID
 
-from src.etl.common import TERMS, DataValidationError
+from src.etl.common import SOURCE_TERMS, TARGET_TERMS, DataValidationError
 
 PRECISION = 38
 SCENARIOS = (
@@ -191,7 +191,7 @@ def prepare_base_curve(
     seen = set()
     for tenor, rate in snapshot.rates.items():
         tenor = _decimal(tenor, "Срок")
-        if tenor not in TERMS or tenor in seen:
+        if tenor not in SOURCE_TERMS or tenor in seen:
             raise DataValidationError(f"Неожиданный или повторный срок {tenor}")
         seen.add(tenor)
         if rate is not None:
@@ -204,7 +204,7 @@ def prepare_base_curve(
     result = []
     with localcontext() as context:
         context.prec = PRECISION
-        for tenor in TERMS:
+        for tenor in TARGET_TERMS:
             interpolated = extrapolated = False
             if tenor in known:
                 rate = known[tenor]
@@ -241,11 +241,11 @@ def calculate_scenarios(
 ) -> tuple[ScenarioCurve, ...]:
     """Calculate scenarios from restored base rates, independent of DB/Excel."""
     parameters = parameters or ScenarioParameters()
-    if len(base_points) != len(TERMS) or {point.tenor for point in base_points} != set(
-        TERMS
-    ):
+    if len(base_points) != len(TARGET_TERMS) or {
+        point.tenor for point in base_points
+    } != set(TARGET_TERMS):
         raise DataValidationError(
-            "Для сценариев нужна базовая кривая со всеми 12 сроками"
+            f"Для сценариев нужна базовая кривая со всеми {len(TARGET_TERMS)} сроками"
         )
     if len({(point.curve_date, point.quote_time) for point in base_points}) != 1:
         raise DataValidationError("Нельзя смешивать точки разных снимков")
