@@ -6,7 +6,12 @@ from click.testing import CliRunner
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
 from src.etl import parse
-from src.etl.common import MANIFEST_NAME, OUTPUT_NAME, DateRange, atomic_write_csv
+from src.etl.common import (
+    MANIFEST_NAME,
+    OUTPUT_NAME,
+    DateRange,
+    atomic_write_csv,
+)
 from src.etl.merge import merge_run
 
 DATES = DateRange(date(2026, 10, 27), date(2026, 10, 30))
@@ -164,7 +169,9 @@ def test_global_timeout_is_not_reset_for_next_file(tmp_path, monkeypatch, moex_c
     assert not (tmp_path / "run" / OUTPUT_NAME).exists()
 
 
-def test_invalid_export_closes_browser_and_keeps_only_raw_input(tmp_path, monkeypatch):
+def test_insufficient_export_closes_browser_and_preserves_missing_rates(
+    tmp_path, monkeypatch
+):
     driver = Driver()
     monkeypatch.setattr(parse, "create_driver", lambda path: driver)
 
@@ -176,11 +183,12 @@ def test_invalid_export_closes_browser_and_keeps_only_raw_input(tmp_path, monkey
         return path
 
     monkeypatch.setattr(parse, "_download_range", download)
-    with pytest.raises(ValueError):
-        parse.collect_curves(DATES, tmp_path / "run")
+    result = parse.collect_curves(DATES, tmp_path / "run")
+    assert result.snapshot_count == 1
     assert driver.closed
     assert (tmp_path / "run" / MANIFEST_NAME).exists()
-    assert not (tmp_path / "run" / OUTPUT_NAME).exists()
+    assert (tmp_path / "run" / OUTPUT_NAME).exists()
+    assert "NA" in (tmp_path / "run" / OUTPUT_NAME).read_text(encoding="utf-8")
 
 
 def test_download_waits_for_partial_files_and_stable_size(tmp_path, monkeypatch):

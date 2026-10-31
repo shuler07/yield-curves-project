@@ -1,4 +1,4 @@
-"""Validate explicit CSV/ZIP exports and publish complete MOEX snapshots."""
+"""Validate exports and preserve missing rates explicitly on a fixed tenor grid."""
 
 from __future__ import annotations
 
@@ -6,13 +6,15 @@ import csv
 import io
 import zipfile
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import click
 
 from src.etl.common import (
+    MISSING_RATE,
+    MISSING_RATE_TOKENS,
     OUTPUT_NAME,
     TERMS,
     DataValidationError,
@@ -24,10 +26,18 @@ from src.etl.common import (
 
 
 @dataclass(frozen=True)
+class IncompleteSnapshot:
+    curve_date: date
+    quote_time: time
+    missing_terms: tuple[Decimal, ...]
+
+
+@dataclass(frozen=True)
 class MergeResult:
     output_file: Path
     snapshot_count: int
     missing_dates: tuple[date, ...]
+    incomplete_snapshots: tuple[IncompleteSnapshot, ...] = ()
 
 
 def _csv_sources(path: Path):
@@ -90,7 +100,7 @@ def _read_rows(source: str, content: str, dates: DateRange, merged: dict) -> Non
         else:
             raise ValueError("не найден заголовок tradedate")
         header = [cell.strip().lower() for cell in header]
-        if len(header) < 3 or header[1] != "tradetime":
+        if len(header) < 2 or header[1] != "tradetime":
             raise ValueError("ожидались колонки tradedate;tradetime;period_...")
         terms = [_parse_term(column) for column in header[2:]]
         if len(set(terms)) != len(terms):
@@ -109,6 +119,8 @@ def _read_rows(source: str, content: str, dates: DateRange, merged: dict) -> Non
             key = (tradedate, tradetime)
             snapshot = merged.setdefault(key, {})
             for term, raw in zip(terms, row[2:], strict=True):
+                if raw.strip().upper() in MISSING_RATE_TOKENS:
+                    continue
                 try:
                     value = Decimal(raw.strip().replace(",", "."))
                 except InvalidOperation as exc:
@@ -129,11 +141,14 @@ def _read_rows(source: str, content: str, dates: DateRange, merged: dict) -> Non
 
 
 def extract_and_merge(
-    files: list[Path], output_file: Path, dates: DateRange
+    files: list[Path],
+    output_file: Path,
+    dates: DateRange,
 ) -> MergeResult:
     if not files:
         raise DataValidationError("Не переданы файлы для объединения")
-    if output_file.resolve() in {path.resolve() for path in files}:
+    sources = {path.resolve() for path in files}
+    if output_file.resolve() in sources:
         raise DataValidationError("Итоговый CSV не может заменять исходный файл")
     merged = {}
     for path in files:
@@ -142,13 +157,13 @@ def extract_and_merge(
     if not merged:
         raise NoDataError(f"Нет котировок за {dates.start} — {dates.end}")
     expected = set(TERMS)
-    for (tradedate, tradetime), values in sorted(merged.items()):
-        missing = expected - values.keys()
-        if missing:
-            raise DataValidationError(
-                f"Неполный снимок {tradedate} {tradetime}: отсутствуют сроки "
-                + ", ".join(str(term) for term in sorted(missing))
-            )
+    incomplete = tuple(
+        IncompleteSnapshot(
+            tradedate, tradetime, tuple(sorted(expected - values.keys()))
+        )
+        for (tradedate, tradetime), values in sorted(merged.items())
+        if expected - values.keys()
+    )
 
     def write_rows(stream):
         writer = csv.writer(stream, delimiter=";", lineterminator="\n")
@@ -160,7 +175,10 @@ def extract_and_merge(
                 [
                     tradedate.strftime("%d.%m.%Y"),
                     tradetime.strftime("%H:%M:%S"),
-                    *(format(values[term], "f") for term in TERMS),
+                    *(
+                        format(values[term], "f") if term in values else MISSING_RATE
+                        for term in TERMS
+                    ),
                 ]
             )
 
@@ -170,6 +188,7 @@ def extract_and_merge(
         output_file,
         len(merged),
         tuple(day for day in dates.days() if day not in observed_dates),
+        incomplete,
     )
 
 
@@ -180,9 +199,13 @@ def merge_run(run_dir: Path) -> MergeResult:
 
 def print_result(result: MergeResult) -> None:
     click.echo(f"CSV: {result.output_file}")
-    click.echo(
-        f"Полных снимков: {result.snapshot_count}; сроков в каждом: {len(TERMS)}"
-    )
+    click.echo(f"Снимков: {result.snapshot_count}; колонок сроков: {len(TERMS)}")
+    for snapshot in result.incomplete_snapshots:
+        click.echo(
+            f"Пропуски {snapshot.curve_date} {snapshot.quote_time}: "
+            + ", ".join(str(term) for term in snapshot.missing_terms)
+            + f" (в CSV отмечены {MISSING_RATE})"
+        )
     if result.missing_dates:
         click.echo(
             "Даты без котировок (не заполняются): "

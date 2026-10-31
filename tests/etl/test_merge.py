@@ -76,7 +76,7 @@ def test_zip_parts_combine_into_complete_snapshots_without_extraction(
     assert not (tmp_path / "unpacked").exists()
 
 
-@pytest.mark.parametrize("value", ["", "abc", "NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("value", ["abc", "Infinity", "-Infinity"])
 def test_invalid_rates_fail_before_publishing(tmp_path, moex_csv, value):
     source = save_source(tmp_path, replace_cell(moex_csv, 2, value))
     output = tmp_path / OUTPUT_NAME
@@ -107,7 +107,7 @@ def test_changed_source_format_is_not_silently_accepted(tmp_path, moex_csv, muta
         extract_and_merge([source], tmp_path / OUTPUT_NAME, DATES)
 
 
-def test_incomplete_snapshot_preserves_previous_good_output(tmp_path, moex_csv):
+def test_incomplete_snapshots_are_published_with_missing_marker(tmp_path, moex_csv):
     lines = [
         line.rsplit(";", 1)[0] if ";" in line else line
         for line in moex_csv.splitlines()
@@ -115,10 +115,100 @@ def test_incomplete_snapshot_preserves_previous_good_output(tmp_path, moex_csv):
     source = save_source(tmp_path, "\n".join(lines))
     output = tmp_path / OUTPUT_NAME
     output.write_text("previous good result", encoding="utf-8")
-    with pytest.raises(DataValidationError, match="20"):
-        extract_and_merge([source], output, DATES)
-    assert output.read_text(encoding="utf-8") == "previous good result"
+    result = extract_and_merge([source], output, DATES)
+    with output.open(encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream, delimiter=";"))
+    assert len(rows) == 4
+    assert all(row["period_20"] == "NA" for row in rows)
+    assert all(row["period_0.25"] != "NA" for row in rows)
+    assert len(result.incomplete_snapshots) == 4
+    assert all(
+        snapshot.missing_terms == (Decimal(20),)
+        for snapshot in result.incomplete_snapshots
+    )
     assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("value", ["", "NA", "N/A", "NULL", "NaN", "  na "])
+def test_explicit_missing_rates_are_preserved_without_filling(
+    tmp_path, moex_csv, value
+):
+    source = save_source(tmp_path, replace_cell(moex_csv, 4, value))
+    write_manifest(tmp_path, DATES, [source])
+    result = merge_run(tmp_path)
+    with result.output_file.open(encoding="utf-8") as stream:
+        raw = list(csv.DictReader(stream, delimiter=";"))
+    assert raw[0]["period_0.75"] == "NA"
+    assert raw[0]["period_0.5"] == "13.43"
+    assert raw[1]["period_0.75"] == "13.64"
+    assert result.incomplete_snapshots[0].missing_terms == (Decimal("0.75"),)
+    assert not (tmp_path / "prepared_zcyc_ranges.csv").exists()
+
+
+def test_missing_duplicate_does_not_erase_a_known_rate(tmp_path, moex_csv):
+    observed = save_source(tmp_path, moex_csv)
+    missing = save_source(tmp_path, replace_cell(moex_csv, 2, "NA"), "missing.csv")
+    for files in ([observed, missing], [missing, observed]):
+        result = extract_and_merge(files, tmp_path / OUTPUT_NAME, DATES)
+        assert not result.incomplete_snapshots
+
+
+def test_zero_rate_is_preserved_as_observation(tmp_path, moex_csv):
+    source = save_source(tmp_path, replace_cell(moex_csv, 2, "0"))
+    result = extract_and_merge([source], tmp_path / OUTPUT_NAME, DATES)
+    with result.output_file.open(encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream, delimiter=";"))
+    assert rows[0]["period_0.25"] == "0"
+    assert not result.incomplete_snapshots
+
+
+@pytest.mark.parametrize(
+    "source_content",
+    [
+        "tradedate;tradetime\n27.10.2026;18:00:00\n",
+        "tradedate;tradetime;period_1\n27.10.2026;18:00:00;12\n",
+        "tradedate;tradetime;period_1;period_2\n27.10.2026;18:00:00;NA;\n",
+    ],
+)
+def test_snapshot_with_zero_or_one_known_rate_is_saved(tmp_path, source_content):
+    source = save_source(tmp_path, source_content)
+    write_manifest(tmp_path, DATES, [source])
+    result = merge_run(tmp_path)
+    assert result.snapshot_count == 1
+    assert (tmp_path / OUTPUT_NAME).exists()
+    assert "NA" in (tmp_path / OUTPUT_NAME).read_text(encoding="utf-8")
+
+
+def test_cli_saves_missing_marker_and_reports_missing_terms(tmp_path):
+    source = save_source(
+        tmp_path, "tradedate;tradetime;period_1;period_5\n27.10.2026;18:00:00;10;14\n"
+    )
+    write_manifest(tmp_path, DATES, [source])
+    result = CliRunner().invoke(main, ["--run-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "NA" in result.output
+    assert "Пропуски 2026-10-27 18:00:00" in result.output
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "manifest.json",
+        "merged_zcyc_ranges.csv",
+        "source.csv",
+    ]
+
+
+def test_missing_rates_are_not_filled_from_other_dates(tmp_path):
+    source = save_source(
+        tmp_path,
+        "tradedate;tradetime;period_1;period_5\n"
+        "27.10.2026;18:00:00;10;14\n"
+        "28.10.2026;18:00:00;99;NA\n",
+    )
+    write_manifest(tmp_path, DATES, [source])
+    result = merge_run(tmp_path)
+    assert (tmp_path / OUTPUT_NAME).exists()
+    with result.output_file.open(encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream, delimiter=";"))
+    assert rows[1]["period_5"] == "NA"
+    assert rows[1]["period_1"] == "99"
 
 
 def test_duplicates_are_numeric_but_conflicts_are_errors(tmp_path, moex_csv):

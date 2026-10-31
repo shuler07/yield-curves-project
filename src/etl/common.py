@@ -28,10 +28,12 @@ SOURCE_URL = "https://www.moex.com/ru/marketdata/indices/state/g-curve/archive/"
 DEFAULT_DOWNLOADS_DIR = Path(__file__).resolve().parent / "downloads"
 MANIFEST_NAME = "manifest.json"
 OUTPUT_NAME = "merged_zcyc_ranges.csv"
+MISSING_RATE = "NA"
+MISSING_RATE_TOKENS = frozenset({"", "NA", "N/A", "NULL", "NAN"})
 
 
 class DataValidationError(ValueError):
-    """The export cannot be published as complete curve snapshots."""
+    """The export has an invalid structure or invalid observed values."""
 
 
 class NoDataError(DataValidationError):
