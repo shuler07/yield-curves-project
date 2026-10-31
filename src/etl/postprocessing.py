@@ -24,7 +24,8 @@ from src.etl.calculations import (
 from src.etl.common import (
     MISSING_RATE_TOKENS,
     OUTPUT_NAME,
-    TERMS,
+    SOURCE_TERMS,
+    TARGET_TERMS,
     DataValidationError,
     NoDataError,
 )
@@ -42,19 +43,19 @@ def read_snapshots(input_file: Path) -> tuple[RawSnapshot, ...]:
         reader = csv.reader(stream, delimiter=";", strict=True)
         try:
             header = next(reader, [])
-            if len(header) != len(TERMS) + 2 or header[:2] != [
+            if len(header) != len(SOURCE_TERMS) + 2 or header[:2] != [
                 "tradedate",
                 "tradetime",
             ]:
                 raise ValueError(
-                    "ожидался merged CSV: tradedate;tradetime и все 12 period_..."
+                    f"ожидался merged CSV: tradedate;tradetime и все {len(SOURCE_TERMS)} period_..."
                 )
             terms = []
             for column in header[2:]:
                 if not column.startswith("period_"):
                     raise ValueError(f"неизвестная колонка {column!r}")
                 term = Decimal(column.removeprefix("period_"))
-                if not term.is_finite() or term not in TERMS or term in terms:
+                if not term.is_finite() or term not in SOURCE_TERMS or term in terms:
                     raise ValueError(f"неожиданный или повторный срок {column!r}")
                 terms.append(term)
             for row in reader:
@@ -289,7 +290,7 @@ def main(run_dir, input_file, xlsx, shock_bps):
         )
         history = calculate_history(source, parameters)
         click.echo(
-            f"Снимков: {len(history)}; базовых точек: {len(history) * len(TERMS)}; стрессовых точек: {len(history) * len(TERMS) * len(SCENARIOS)}"
+            f"Снимков: {len(history)}; базовых точек: {len(history) * len(TARGET_TERMS)}; стрессовых точек: {len(history) * len(TARGET_TERMS) * len(SCENARIOS)}"
         )
         points = [point for snapshot in history for point in snapshot.base_points]
         click.echo(

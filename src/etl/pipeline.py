@@ -23,7 +23,7 @@ from src.etl.calculations import (
 from src.etl.common import (
     DEFAULT_DOWNLOADS_DIR,
     OUTPUT_NAME,
-    TERMS,
+    SOURCE_TERMS,
     DataValidationError,
     DateRange,
     NoDataError,
@@ -224,7 +224,7 @@ def run_pipeline(
                 raise DataValidationError("Снимок вне запрошенного диапазона")
             grouped[snapshot.curve_date].append(snapshot)
         result.missing_dates = [day for day in dates.days() if day not in grouped]
-        result.rows_processed = len(snapshots) * len(TERMS)
+        result.rows_processed = len(snapshots) * len(SOURCE_TERMS)
         for day, day_snapshots in sorted(grouped.items()):
             try:
                 with factory.begin() as session:

@@ -8,7 +8,7 @@ from click.testing import CliRunner
 from openpyxl import load_workbook
 
 from src.etl.calculations import SCENARIOS, ScenarioParameters
-from src.etl.common import OUTPUT_NAME, TERMS, DataValidationError, DateRange
+from src.etl.common import OUTPUT_NAME, SOURCE_TERMS, DataValidationError, DateRange
 from src.etl.merge import extract_and_merge
 from src.etl.postprocessing import (
     calculate_history,
@@ -34,7 +34,9 @@ def test_csv_input_converts_percent_once_and_uses_all_snapshot_times(merged_file
     assert snapshots[0].rates[Decimal("0.25")] == Decimal("0.1309")
     history = calculate_history(merged_file)
     assert len(history) == 4
-    assert history[0].base_points[0].yield_rate == Decimal("0.1309")
+    point = next(p for p in history[0].base_points if p.tenor == Decimal("0.25"))
+    assert point.yield_rate == Decimal("0.1309")
+    assert len(history[0].base_points) == 19
     assert len(history[0].scenarios) == 6
 
 
@@ -46,7 +48,7 @@ def test_missing_values_are_restored_in_memory_without_changing_csv(merged_file)
     snapshots = read_snapshots(merged_file)
     assert snapshots[0].rates[Decimal("0.75")] is None
     history = calculate_history(merged_file)
-    point = history[0].base_points[2]
+    point = next(p for p in history[0].base_points if p.tenor == Decimal("0.75"))
     assert point.yield_rate == Decimal("0.1372")
     assert point.is_interpolated is True
     assert merged_file.read_bytes() == before
@@ -58,7 +60,7 @@ def test_snapshot_with_less_than_two_values_is_not_borrowed_from_other_days(
 ):
     with merged_file.open(encoding="utf-8") as stream:
         rows = list(csv.reader(stream, delimiter=";"))
-    rows[2][3:] = ["NA"] * (len(TERMS) - 1)
+    rows[2][3:] = ["NA"] * (len(SOURCE_TERMS) - 1)
     with merged_file.open("w", encoding="utf-8", newline="") as stream:
         csv.writer(stream, delimiter=";").writerows(rows)
     with pytest.raises(DataValidationError, match="2026-10-28.*две"):
@@ -79,8 +81,8 @@ def test_cli_uses_explicit_run_directory_without_writing_files(merged_file):
     before = set(merged_file.parent.iterdir())
     result = CliRunner().invoke(main, ["--run-dir", str(merged_file.parent)])
     assert result.exit_code == 0, result.output
-    assert "базовых точек: 48" in result.output
-    assert "стрессовых точек: 288" in result.output
+    assert "базовых точек: 76" in result.output
+    assert "стрессовых точек: 456" in result.output
     assert ScenarioParameters().version in result.output
     assert set(merged_file.parent.iterdir()) == before
 
@@ -96,15 +98,16 @@ def test_excel_export_preserves_calculation_precision_and_source_csv(
     try:
         assert workbook.sheetnames == ["Baseline", *SCENARIOS, "Parameters"]
         sheet = workbook["Baseline"]
-        assert sheet.max_row == 49
-        assert sheet["D2"].value == pytest.approx(0.1309)
-        assert sheet["D2"].number_format == "0.00%"
-        assert sheet["F2"].value is False
+        assert sheet.max_row == 77
+        assert sheet["C4"].value == 0.25
+        assert sheet["D4"].value == pytest.approx(0.1309)
+        assert sheet["D4"].number_format == "0.00%"
+        assert sheet["F4"].value is False
         assert "discount_convention" not in [cell.value for cell in sheet[1]]
         assert "discount_convention" not in [
             cell.value for cell in workbook["Parallel_Up"][1]
         ]
-        assert workbook["Parallel_Up"]["E2"].value == pytest.approx(0.1709)
+        assert workbook["Parallel_Up"]["E4"].value == pytest.approx(0.1709)
         assert workbook["Parameters"].max_row == 7
     finally:
         workbook.close()

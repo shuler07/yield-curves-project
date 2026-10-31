@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-TERMS = tuple(
+SOURCE_TERMS = tuple(
     Decimal(value)
     for value in (
         "0.25",
@@ -22,6 +22,20 @@ TERMS = tuple(
         "10",
         "15",
         "20",
+    )
+)
+# Years, rounded to the NUMERIC(12, 6) precision used by curve_points.tenor.
+# Keep these keys identical in calculations, PostgreSQL RETURNING and repeat loads.
+DAY_TENOR = Decimal("0.002740")  # 1 / 365 (ACT/365)
+MONTH_TENOR = Decimal("0.083333")  # 1 / 12
+TARGET_TERMS = tuple(
+    sorted(
+        (
+            *SOURCE_TERMS,
+            DAY_TENOR,
+            MONTH_TENOR,
+            *(Decimal(value) for value in ("1.5", "6", "8", "9", "30")),
+        )
     )
 )
 SOURCE_URL = "https://www.moex.com/ru/marketdata/indices/state/g-curve/archive/"

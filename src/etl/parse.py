@@ -19,8 +19,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from src.etl.common import (
     DEFAULT_DOWNLOADS_DIR,
+    SOURCE_TERMS,
     SOURCE_URL,
-    TERMS,
     DateRange,
     write_manifest,
 )
@@ -125,7 +125,7 @@ def _download_range(driver, run_dir: Path, dates: DateRange, deadline: float) ->
         EC.element_to_be_clickable(TERM_INPUT)
     )
     field.send_keys(Keys.CONTROL, "a")
-    field.send_keys(",".join(str(term) for term in TERMS), Keys.ENTER)
+    field.send_keys(",".join(str(term) for term in SOURCE_TERMS), Keys.ENTER)
     button = WebDriverWait(driver, _remaining(deadline)).until(
         EC.element_to_be_clickable(DOWNLOAD_BUTTON)
     )

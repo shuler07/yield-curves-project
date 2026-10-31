@@ -9,6 +9,7 @@ from src.etl import parse
 from src.etl.common import (
     MANIFEST_NAME,
     OUTPUT_NAME,
+    SOURCE_TERMS,
     DateRange,
     atomic_write_csv,
 )
@@ -293,6 +294,8 @@ def test_single_day_uses_accepted_upstream_range(
         FormDriver(), tmp_path, DateRange(target, target), parse.monotonic() + 10
     )
     assert [element.keys[1][0] for element in date_fields] == list(expected)
+    assert term.keys[1][0] == ",".join(map(str, SOURCE_TERMS))
+    assert len(term.keys[1][0].split(",")) == 12
     assert result.name == f"curve_{target}_{target}.csv"
 
 

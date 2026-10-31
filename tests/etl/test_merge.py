@@ -10,7 +10,7 @@ from click.testing import CliRunner
 
 from src.etl.common import (
     OUTPUT_NAME,
-    TERMS,
+    SOURCE_TERMS,
     DataValidationError,
     DateRange,
     NoDataError,
@@ -48,7 +48,7 @@ def test_real_moex_export_is_filtered_sorted_and_not_rounded(tmp_path, moex_csv)
         assert reader.fieldnames == [
             "tradedate",
             "tradetime",
-            *(f"period_{t}" for t in TERMS),
+            *(f"period_{t}" for t in SOURCE_TERMS),
         ]
     assert result.snapshot_count == 2
     assert result.missing_dates == ()

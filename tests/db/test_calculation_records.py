@@ -43,8 +43,8 @@ def test_calculation_records_fit_database_and_preserve_provenance(db, run_type):
             )
         session.flush()
         session.expire_all()
-        assert session.scalar(select(func.count()).select_from(CurvePoint)) == 12
-        assert session.scalar(select(func.count()).select_from(StressCurve)) == 72
+        assert session.scalar(select(func.count()).select_from(CurvePoint)) == 19
+        assert session.scalar(select(func.count()).select_from(StressCurve)) == 114
         assert session.scalar(select(func.count()).select_from(StressShock)) == 6
         point = session.scalar(select(CurvePoint).where(CurvePoint.tenor == 2))
         assert point.is_interpolated is True
