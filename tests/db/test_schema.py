@@ -77,6 +77,45 @@ def stress_values(run_id, point_id, shock_id, **overrides):
 def test_schema_matches_models_and_migration_round_trip(migrated_db):
     engine, config = migrated_db
     command.check(config)
+    command.downgrade(config, "0001_create_db")
+    with engine.begin() as connection:
+        run_id = insert_run(connection)
+        point_id = connection.execute(
+            text(
+                "INSERT INTO curve_points (curve_date, quote_time, tenor, yield_rate, "
+                "discount_factor, discount_convention, etl_run_id) "
+                "VALUES ('2026-10-19', '18:50:00', 1, 0.15, 0.86, 'test-v1', :run_id) "
+                "RETURNING id"
+            ),
+            {"run_id": run_id},
+        ).scalar_one()
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        point = (
+            connection.execute(
+                select(CurvePoint.__table__).where(CurvePoint.id == point_id)
+            )
+            .mappings()
+            .one()
+        )
+        assert point["yield_rate"] == Decimal("0.15")
+        assert all(
+            point[name] is False
+            for name in ("is_interpolated", "is_extrapolated", "is_deleted")
+        )
+    command.downgrade(config, "0001_create_db")
+    assert not {"is_interpolated", "is_extrapolated", "is_deleted"} & {
+        column["name"] for column in inspect(engine).get_columns("curve_points")
+    }
+    with engine.connect() as connection:
+        assert (
+            connection.scalar(
+                text("SELECT id FROM curve_points WHERE id = :id"), {"id": point_id}
+            )
+            == point_id
+        )
+    command.upgrade(config, "head")
+    command.check(config)
     command.downgrade(config, "base")
     assert set(inspect(engine).get_table_names()) == {"alembic_version"}
     command.upgrade(config, "head")
@@ -89,6 +128,30 @@ def test_schema_matches_models_and_migration_round_trip(migrated_db):
         "stress_shocks",
         "stress_curves",
     }
+
+
+def test_curve_point_flags_default_to_false_and_can_be_updated(db):
+    point_id = insert_point(db, insert_run(db))
+    with Session(bind=db) as session:
+        point = session.get(CurvePoint, point_id)
+        assert point.is_interpolated is False
+        assert point.is_extrapolated is False
+        assert point.is_deleted is False
+        point.is_interpolated = True
+        point.is_extrapolated = True
+        point.is_deleted = True
+        session.flush()
+        session.expire(point)
+        assert point.is_interpolated is True
+        assert point.is_extrapolated is True
+        assert point.is_deleted is True
+
+
+@pytest.mark.parametrize("field", ["is_interpolated", "is_extrapolated", "is_deleted"])
+def test_curve_point_flags_do_not_allow_null(db, field):
+    run_id = insert_run(db)
+    with pytest.raises(IntegrityError), db.begin_nested():
+        insert_point(db, run_id, **{field: None})
 
 
 def test_models_round_trip_and_scenario_versions(db):
