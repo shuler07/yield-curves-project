@@ -1,120 +1,232 @@
+"""Validate exports and preserve missing rates explicitly on a fixed tenor grid."""
+
 from __future__ import annotations
 
 import csv
 import io
 import zipfile
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime, time
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
-DOWNLOADS_DIR = BASE_DIR / "downloads"
-UNPACK_DIR = DOWNLOADS_DIR / "unpacked"
-OUTPUT_FILE = DOWNLOADS_DIR / "merged_zcyc_ranges.csv"
+import click
+
+from src.etl.common import (
+    MISSING_RATE,
+    MISSING_RATE_TOKENS,
+    OUTPUT_NAME,
+    TERMS,
+    DataValidationError,
+    DateRange,
+    NoDataError,
+    atomic_write_csv,
+    read_manifest,
+)
 
 
-def sort_period_columns(columns: list[str]) -> list[str]:
-    def period_key(name: str):
-        if not name.startswith("period_"):
-            return (1, name)
-        value_str = name.split("_", 1)[1]
+@dataclass(frozen=True)
+class IncompleteSnapshot:
+    curve_date: date
+    quote_time: time
+    missing_terms: tuple[Decimal, ...]
+
+
+@dataclass(frozen=True)
+class MergeResult:
+    output_file: Path
+    snapshot_count: int
+    missing_dates: tuple[date, ...]
+    incomplete_snapshots: tuple[IncompleteSnapshot, ...] = ()
+
+
+def _csv_sources(path: Path):
+    """Read archive members in memory; never extract untrusted paths to disk."""
+    try:
+        if path.suffix.lower() == ".csv":
+            yield path.name, path.read_text(encoding="utf-8-sig")
+        elif path.suffix.lower() == ".zip":
+            with zipfile.ZipFile(path) as archive:
+                bad_member = archive.testzip()
+                if bad_member is not None:
+                    raise DataValidationError(
+                        f"Нарушена целостность ZIP {path.name}: {bad_member}"
+                    )
+                members = [
+                    m
+                    for m in archive.infolist()
+                    if not m.is_dir() and m.filename.lower().endswith(".csv")
+                ]
+                if not members:
+                    raise DataValidationError(f"В ZIP {path.name} нет CSV")
+                for member in members:
+                    yield (
+                        f"{path.name}/{member.filename}",
+                        archive.read(member).decode("utf-8-sig"),
+                    )
+        else:
+            raise DataValidationError(f"Ожидался CSV или ZIP: {path.name}")
+    except (zipfile.BadZipFile, UnicodeError, RuntimeError, EOFError) as exc:
+        raise DataValidationError(f"Не удалось прочитать {path.name}: {exc}") from exc
+
+
+def _parse_date(value: str) -> date:
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
         try:
-            return (0, float(value_str))
+            return datetime.strptime(value, fmt).date()
         except ValueError:
-            return (1, value_str)
+            pass
+    raise ValueError(f"некорректная дата {value!r}")
 
-    return sorted(columns, key=period_key)
+
+def _parse_term(column: str) -> Decimal:
+    if not column.startswith("period_"):
+        raise ValueError(f"неизвестная колонка {column!r}")
+    try:
+        term = Decimal(column.removeprefix("period_"))
+    except InvalidOperation as exc:
+        raise ValueError(f"некорректный срок {column!r}") from exc
+    if not term.is_finite() or term not in TERMS:
+        raise ValueError(f"неожиданный срок {column!r}")
+    return term
 
 
-def extract_and_merge() -> None:
-    UNPACK_DIR.mkdir(exist_ok=True)
-
-    merged_rows: dict[tuple[str, str], dict[str, str]] = {}
-    period_columns: list[str] = []
-
-    zip_files = sorted(DOWNLOADS_DIR.glob("*.zip"))
-    if not zip_files:
-        raise FileNotFoundError(f"Не найдено zip-файлов в папке: {DOWNLOADS_DIR}")
-
-    for archive_path in zip_files:
-        with zipfile.ZipFile(archive_path) as archive:
-            members = [name for name in archive.namelist() if name.lower().endswith(".csv")]
-            if not members:
+def _read_rows(source: str, content: str, dates: DateRange, merged: dict) -> None:
+    reader = csv.reader(io.StringIO(content), delimiter=";", strict=True)
+    try:
+        for header in reader:
+            if header and header[0].strip().lower() == "tradedate":
+                break
+        else:
+            raise ValueError("не найден заголовок tradedate")
+        header = [cell.strip().lower() for cell in header]
+        if len(header) < 2 or header[1] != "tradetime":
+            raise ValueError("ожидались колонки tradedate;tradetime;period_...")
+        terms = [_parse_term(column) for column in header[2:]]
+        if len(set(terms)) != len(terms):
+            raise ValueError("повторяющиеся сроки в заголовке")
+        for row in reader:
+            if not row or not any(cell.strip() for cell in row):
                 continue
-
-            for csv_name in members:
-                extracted_name = f"{archive_path.stem}_{Path(csv_name).name}"
-                extracted_path = UNPACK_DIR / extracted_name
-                extracted_path.write_bytes(archive.read(csv_name))
-
-                text = extracted_path.read_text(encoding="utf-8-sig", errors="replace")
-                reader = csv.reader(io.StringIO(text), delimiter=';')
-
-                header_found = False
-                header = []
-
-                for row in reader:
-                    if not row:
-                        continue
-
-                    first_cell = row[0].strip().lower()
-                    if first_cell == "tradedate":
-                        header = row
-                        header_found = True
-                        break
-
-                if not header_found or len(header) < 3:
+            if len(row) != len(header):
+                raise ValueError(
+                    f"ожидалось {len(header)} колонок, получено {len(row)}"
+                )
+            tradedate = _parse_date(row[0].strip())
+            if not dates.start <= tradedate <= dates.end:
+                continue
+            tradetime = datetime.strptime(row[1].strip(), "%H:%M:%S").time()
+            key = (tradedate, tradetime)
+            snapshot = merged.setdefault(key, {})
+            for term, raw in zip(terms, row[2:], strict=True):
+                if raw.strip().upper() in MISSING_RATE_TOKENS:
                     continue
+                try:
+                    value = Decimal(raw.strip().replace(",", "."))
+                except InvalidOperation as exc:
+                    raise ValueError(
+                        f"некорректная ставка {raw!r} для срока {term}"
+                    ) from exc
+                if not value.is_finite():
+                    raise ValueError(
+                        f"ставка для срока {term} должна быть конечным числом"
+                    )
+                if term in snapshot and snapshot[term] != value:
+                    raise ValueError(
+                        f"конфликт ставок для {tradedate} {tradetime}, срок {term}"
+                    )
+                snapshot[term] = value
+    except (ValueError, InvalidOperation, csv.Error) as exc:
+        raise DataValidationError(f"{source}, строка {reader.line_num}: {exc}") from exc
 
-                period_column = header[2].strip()
-                if period_column not in period_columns:
-                    period_columns.append(period_column)
 
-                for row in reader:
-                    if len(row) < 3:
-                        continue
+def extract_and_merge(
+    files: list[Path],
+    output_file: Path,
+    dates: DateRange,
+) -> MergeResult:
+    if not files:
+        raise DataValidationError("Не переданы файлы для объединения")
+    sources = {path.resolve() for path in files}
+    if output_file.resolve() in sources:
+        raise DataValidationError("Итоговый CSV не может заменять исходный файл")
+    merged = {}
+    for path in files:
+        for source, content in _csv_sources(path):
+            _read_rows(source, content, dates, merged)
+    if not merged:
+        raise NoDataError(f"Нет котировок за {dates.start} — {dates.end}")
+    expected = set(TERMS)
+    incomplete = tuple(
+        IncompleteSnapshot(
+            tradedate, tradetime, tuple(sorted(expected - values.keys()))
+        )
+        for (tradedate, tradetime), values in sorted(merged.items())
+        if expected - values.keys()
+    )
 
-                    tradedate = row[0].strip()
-                    tradetime = row[1].strip()
-                    value = row[2].strip()
+    def write_rows(stream):
+        writer = csv.writer(stream, delimiter=";", lineterminator="\n")
+        writer.writerow(
+            ["tradedate", "tradetime", *(f"period_{term}" for term in TERMS)]
+        )
+        for (tradedate, tradetime), values in sorted(merged.items()):
+            writer.writerow(
+                [
+                    tradedate.strftime("%d.%m.%Y"),
+                    tradetime.strftime("%H:%M:%S"),
+                    *(
+                        format(values[term], "f") if term in values else MISSING_RATE
+                        for term in TERMS
+                    ),
+                ]
+            )
 
-                    if not tradedate or not tradetime:
-                        continue
+    atomic_write_csv(output_file, write_rows)
+    observed_dates = {key[0] for key in merged}
+    return MergeResult(
+        output_file,
+        len(merged),
+        tuple(day for day in dates.days() if day not in observed_dates),
+        incomplete,
+    )
 
-                    key = (tradedate, tradetime)
-                    if key not in merged_rows:
-                        merged_rows[key] = {}
 
-                    if period_column in merged_rows[key] and merged_rows[key][period_column] != value:
-                        raise ValueError(
-                            f"Обнаружено конфликтующее значение для ключа {key} "
-                            f"в колонке {period_column}: "
-                            f"{merged_rows[key][period_column]!r} vs {value!r}"
-                        )
+def merge_run(run_dir: Path) -> MergeResult:
+    dates, files = read_manifest(run_dir)
+    return extract_and_merge(files, run_dir / OUTPUT_NAME, dates)
 
-                    merged_rows[key][period_column] = value
 
-    if not merged_rows:
-        raise ValueError("После обработки архивов не найдено ни одной строки данных.")
+def print_result(result: MergeResult) -> None:
+    click.echo(f"CSV: {result.output_file}")
+    click.echo(f"Снимков: {result.snapshot_count}; колонок сроков: {len(TERMS)}")
+    for snapshot in result.incomplete_snapshots:
+        click.echo(
+            f"Пропуски {snapshot.curve_date} {snapshot.quote_time}: "
+            + ", ".join(str(term) for term in snapshot.missing_terms)
+            + f" (в CSV отмечены {MISSING_RATE})"
+        )
+    if result.missing_dates:
+        click.echo(
+            "Даты без котировок (не заполняются): "
+            + ", ".join(day.isoformat() for day in result.missing_dates)
+        )
 
-    period_columns = sort_period_columns(period_columns)
 
-    with OUTPUT_FILE.open("w", encoding="utf-8", newline="") as out_file:
-        writer = csv.writer(out_file, delimiter=';', lineterminator='\n')
-        writer.writerow(["tradedate", "tradetime", *period_columns])
-
-        for key in sorted(
-            merged_rows,
-            key=lambda item: datetime.strptime(f"{item[0]} {item[1]}", "%d.%m.%Y %H:%M:%S"),
-        ):
-            row = [key[0], key[1]]
-            for column in period_columns:
-                row.append(merged_rows[key].get(column, ""))
-            writer.writerow(row)
-
-    print(f"Готово: распаковано {len(zip_files)} архивов и создан файл {OUTPUT_FILE}")
-    print(f"Строк объединено: {len(merged_rows)}")
-    print(f"Колонок итоговой таблицы: {len(period_columns)}")
+@click.command()
+@click.option(
+    "--run-dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    required=True,
+    help="Каталог запуска с manifest.json.",
+)
+def main(run_dir: Path) -> None:
+    """Повторная проверка и объединение файлов конкретного запуска без браузера."""
+    try:
+        print_result(merge_run(run_dir))
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":
-    extract_and_merge()
+    main()
