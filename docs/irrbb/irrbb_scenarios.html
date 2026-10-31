@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>IRRBB: Стресс-сценарии Базеля</title>
-    
+
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
     <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
@@ -75,12 +75,13 @@
 <body>
 
 <div class="container">
-    <h1>Визуализация 6 стресс-сценариев IRRBB (BCBS d368)</h1>
-    
+    <h1>Визуализация 6 стресс-сценариев IRRBB</h1>
+
     <div class="formulas">
         <h2>Математические формулы сдвигов</h2>
         <p>В основе непараллельных шоков лежит функция экспоненциального затухания, зависящая от срока \( t \) (в годах):</p>
         <p>\( S(t) = e^{-\frac{t}{4}} \)</p>
+        <p>Параметры проекта: общий шок по умолчанию 400 б.п.; для всех шести сценариев итоговая ставка ограничена снизу 0%: \( R_s(t) = \max(0, R_{base}(t) + \Delta R_s(t)) \). Базовая кривая не ограничивается.</p>
         <hr>
         <p><strong>1. Parallel Up (Параллельный сдвиг вверх):</strong> \( \Delta R_{up}(t) = +\bar{R}_{shock} \)</p>
         <p><strong>2. Parallel Down (Параллельный сдвиг вниз):</strong> \( \Delta R_{down}(t) = -\bar{R}_{shock} \)</p>
@@ -133,13 +134,14 @@
             let t = tenors[i];
             let base = baseCurve[i];
             let st = S(t);
+            const applyShock = delta => Math.max(0, base + delta);
 
-            datasets.parallelUp.push(base + shock);
-            datasets.parallelDown.push(Math.max(0, base - shock));
-            datasets.shortUp.push(base + shock * st);
-            datasets.shortDown.push(Math.max(0, base - shock * st));
-            datasets.steepener.push(Math.max(0, base - 0.65 * shock * st + 0.9 * shock * (1 - st)));
-            datasets.flattener.push(Math.max(0, base + 0.8 * shock * st - 0.6 * shock * (1 - st)));
+            datasets.parallelUp.push(applyShock(shock));
+            datasets.parallelDown.push(applyShock(-shock));
+            datasets.shortUp.push(applyShock(shock * st));
+            datasets.shortDown.push(applyShock(-shock * st));
+            datasets.steepener.push(applyShock(-0.65 * shock * st + 0.9 * shock * (1 - st)));
+            datasets.flattener.push(applyShock(0.8 * shock * st - 0.6 * shock * (1 - st)));
         }
         return datasets;
     }
