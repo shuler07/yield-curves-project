@@ -29,8 +29,7 @@ def point_values(run_id, **overrides):
         "quote_time": time(18, 50),
         "tenor": Decimal(1),
         "yield_rate": Decimal("0.15"),
-        "discount_factor": Decimal("0.860707976425057808"),
-        "discount_convention": "test-continuous-v1",
+        "discount_factor": Decimal("0.869565217391304348"),
         "etl_run_id": run_id,
     }
     values.update(overrides)
@@ -66,8 +65,7 @@ def stress_values(run_id, point_id, shock_id, **overrides):
         "curve_point_id": point_id,
         "stress_shock_id": shock_id,
         "stressed_yield": Decimal("0.19"),
-        "discount_factor": Decimal("0.826959133943362334"),
-        "discount_convention": "test-continuous-v1",
+        "discount_factor": Decimal("0.840336134453781513"),
         "etl_run_id": run_id,
     }
     values.update(overrides)
@@ -114,6 +112,46 @@ def test_schema_matches_models_and_migration_round_trip(migrated_db):
             )
             == point_id
         )
+    command.upgrade(config, "head")
+    command.check(config)
+    command.downgrade(config, "0002_curve_point_flags")
+    with engine.begin() as connection:
+        shock_id = insert_shock(connection)
+        stress_id = connection.execute(
+            text(
+                "INSERT INTO stress_curves (curve_point_id, stress_shock_id, stressed_yield, "
+                "discount_factor, discount_convention, etl_run_id) "
+                "VALUES (:point_id, :shock_id, 0.19, 0.840336134453781513, 'annual_effective_v1', :run_id) "
+                "RETURNING id"
+            ),
+            {"point_id": point_id, "shock_id": shock_id, "run_id": run_id},
+        ).scalar_one()
+    command.upgrade(config, "head")
+    for table in ("curve_points", "stress_curves"):
+        assert "discount_convention" not in {
+            column["name"] for column in inspect(engine).get_columns(table)
+        }
+        assert not any(
+            check["name"].endswith("_convention")
+            for check in inspect(engine).get_check_constraints(table)
+        )
+    with engine.connect() as connection:
+        assert connection.scalar(
+            select(StressCurve.discount_factor).where(StressCurve.id == stress_id)
+        ) == Decimal("0.840336134453781513")
+        assert (
+            connection.scalar(
+                select(StressCurve.curve_point_id).where(StressCurve.id == stress_id)
+            )
+            == point_id
+        )
+    command.downgrade(config, "0002_curve_point_flags")
+    with engine.connect() as connection:
+        for table in ("curve_points", "stress_curves"):
+            assert (
+                connection.scalar(text(f"SELECT discount_convention FROM {table}"))
+                == "annual_effective_v1"
+            )
     command.upgrade(config, "head")
     command.check(config)
     command.downgrade(config, "base")
@@ -167,7 +205,7 @@ def test_models_round_trip_and_scenario_versions(db):
     with Session(bind=db) as session:
         point = session.get(CurvePoint, point_id)
         assert point.yield_rate == Decimal("0.15")
-        assert point.discount_factor == Decimal("0.860707976425057808")
+        assert point.discount_factor == Decimal("0.869565217391304348")
         assert point.created_at.utcoffset() is not None
         assert session.scalar(select(func.count()).select_from(StressCurve)) == 2
 
@@ -217,7 +255,6 @@ def test_stress_duplicate_and_foreign_keys(db):
         {"discount_factor": 0},
         {"discount_factor": -1},
         {"discount_factor": Decimal("NaN")},
-        {"discount_convention": " "},
         {"etl_run_id": uuid4()},
     ],
 )
@@ -233,7 +270,6 @@ def test_invalid_base_points_rejected(db, changes):
         {"stressed_yield": Decimal("NaN")},
         {"discount_factor": 0},
         {"discount_factor": Decimal("NaN")},
-        {"discount_convention": ""},
     ],
 )
 def test_invalid_stress_points_rejected(db, changes):

@@ -64,4 +64,3 @@ def test_calculation_records_fit_database_and_preserve_provenance(db, run_type):
         )
         assert stress.stressed_yield == Decimal("0.14")
         assert stress.discount_factor == Decimal("0.877192982456140351")
-        assert stress.discount_convention == "annual_effective_v1"

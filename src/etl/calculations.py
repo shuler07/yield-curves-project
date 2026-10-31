@@ -13,7 +13,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
 from datetime import date, time
 from decimal import Decimal, DecimalException, InvalidOperation, localcontext
-from enum import Enum
 from uuid import UUID
 
 from src.etl.common import TERMS, DataValidationError
@@ -27,11 +26,6 @@ SCENARIOS = (
     "Steepener",
     "Flattener",
 )
-
-
-class DiscountConvention(str, Enum):
-    ANNUAL_EFFECTIVE = "annual_effective_v1"
-    CONTINUOUS = "continuous_v1"
 
 
 def _decimal(value, label: str) -> Decimal:
@@ -49,23 +43,18 @@ def _decimal(value, label: str) -> Decimal:
 def discount_factor(
     rate: Decimal,
     tenor: Decimal,
-    convention: DiscountConvention = DiscountConvention.ANNUAL_EFFECTIVE,
 ) -> Decimal:
     rate, tenor = _decimal(rate, "Ставка"), _decimal(tenor, "Срок")
-    convention = DiscountConvention(convention)
     if tenor < 0:
         raise DataValidationError("Срок дисконтирования не может быть отрицательным")
-    if convention == DiscountConvention.ANNUAL_EFFECTIVE and rate <= -1:
+    if rate <= -1:
         raise DataValidationError(
             "Для годовой капитализации ставка должна быть больше -100%"
         )
     try:
         with localcontext() as context:
             context.prec = PRECISION
-            if convention == DiscountConvention.ANNUAL_EFFECTIVE:
-                result = (Decimal(1) + rate) ** (-tenor)
-            else:
-                result = (-rate * tenor).exp()
+            result = (Decimal(1) + rate) ** (-tenor)
     except DecimalException as exc:
         raise DataValidationError(
             "Не удалось вычислить коэффициент дисконтирования"
@@ -141,7 +130,6 @@ class BasePoint:
     tenor: Decimal
     yield_rate: Decimal
     discount_factor: Decimal
-    discount_convention: str
     is_interpolated: bool = False
     is_extrapolated: bool = False
     is_deleted: bool = False
@@ -155,7 +143,6 @@ class StressPoint:
     tenor: Decimal
     stressed_yield: Decimal
     discount_factor: Decimal
-    discount_convention: str
 
     def record(
         self, curve_point_id: int, stress_shock_id: int, etl_run_id: UUID
@@ -165,7 +152,6 @@ class StressPoint:
             "stress_shock_id": stress_shock_id,
             "stressed_yield": self.stressed_yield,
             "discount_factor": self.discount_factor,
-            "discount_convention": self.discount_convention,
             "etl_run_id": etl_run_id,
         }
 
@@ -194,7 +180,6 @@ class CalculatedSnapshot:
 
 def prepare_base_curve(
     snapshot: RawSnapshot,
-    convention: DiscountConvention = DiscountConvention.ANNUAL_EFFECTIVE,
 ) -> tuple[BasePoint, ...]:
     """Called at the load boundary, before inserting base points, never by parse.
 
@@ -202,7 +187,6 @@ def prepare_base_curve(
     snapshot. Interior gaps are linear interpolation; edges use the two
     nearest original points for linear extrapolation. No temporal fallback.
     """
-    convention = DiscountConvention(convention)
     known = {}
     seen = set()
     for tenor, rate in snapshot.rates.items():
@@ -244,8 +228,7 @@ def prepare_base_curve(
                     snapshot.quote_time,
                     tenor,
                     rate,
-                    discount_factor(rate, tenor, convention),
-                    convention.value,
+                    discount_factor(rate, tenor),
                     interpolated,
                     extrapolated,
                 )
@@ -294,12 +277,7 @@ def calculate_scenarios(
                         StressPoint(
                             base.tenor,
                             stressed,
-                            discount_factor(
-                                stressed,
-                                base.tenor,
-                                DiscountConvention(base.discount_convention),
-                            ),
-                            base.discount_convention,
+                            discount_factor(stressed, base.tenor),
                         )
                     )
     except DecimalException as exc:
@@ -312,9 +290,8 @@ def calculate_scenarios(
 def calculate_snapshot(
     snapshot: RawSnapshot,
     parameters: ScenarioParameters | None = None,
-    convention: DiscountConvention = DiscountConvention.ANNUAL_EFFECTIVE,
 ) -> CalculatedSnapshot:
-    base = prepare_base_curve(snapshot, convention)
+    base = prepare_base_curve(snapshot)
     return CalculatedSnapshot(
         snapshot.curve_date,
         snapshot.quote_time,

@@ -1,7 +1,7 @@
 """Storage contract. Rates are decimal fractions; tenors are years.
 
-No rate-to-discount formula or scenario calibration is chosen by this module.
-The producer must supply its convention and versioned scenario parameters.
+Discount factors use annual MOEX compounding: (1 + rate) ** (-tenor).
+The calculation layer supplies discount factors and versioned scenario parameters.
 """
 
 from datetime import date, datetime, time
@@ -109,9 +109,6 @@ class CurvePoint(Base):
             "discount_factor > 0 AND discount_factor < 'Infinity'::numeric",
             name="ck_curve_points_discount",
         ),
-        CheckConstraint(
-            "length(btrim(discount_convention)) > 0", name="ck_curve_points_convention"
-        ),
         Index("ix_curve_points_etl_run_id", "etl_run_id"),
     )
 
@@ -121,7 +118,6 @@ class CurvePoint(Base):
     tenor: Mapped[Decimal] = mapped_column(Numeric(12, 6))
     yield_rate: Mapped[Decimal] = mapped_column(Numeric(18, 10))
     discount_factor: Mapped[Decimal] = mapped_column(Numeric(28, 18))
-    discount_convention: Mapped[str] = mapped_column(String(100))
     etl_run_id: Mapped[UUID] = mapped_column(
         ForeignKey("etl_runs.id", name="fk_curve_points_etl_run", ondelete="RESTRICT")
     )
@@ -182,9 +178,6 @@ class StressCurve(Base):
             "discount_factor > 0 AND discount_factor < 'Infinity'::numeric",
             name="ck_stress_curves_discount",
         ),
-        CheckConstraint(
-            "length(btrim(discount_convention)) > 0", name="ck_stress_curves_convention"
-        ),
         Index("ix_stress_curves_shock_point", "stress_shock_id", "curve_point_id"),
         Index("ix_stress_curves_etl_run_id", "etl_run_id"),
     )
@@ -202,7 +195,6 @@ class StressCurve(Base):
     )
     stressed_yield: Mapped[Decimal] = mapped_column(Numeric(18, 10))
     discount_factor: Mapped[Decimal] = mapped_column(Numeric(28, 18))
-    discount_convention: Mapped[str] = mapped_column(String(100))
     etl_run_id: Mapped[UUID] = mapped_column(
         ForeignKey("etl_runs.id", name="fk_stress_curves_etl_run", ondelete="RESTRICT")
     )

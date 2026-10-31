@@ -135,7 +135,6 @@ def export_history_xlsx(
             "tenor",
             "yield_rate",
             "discount_factor",
-            "discount_convention",
             "is_interpolated",
             "is_extrapolated",
             "is_deleted",
@@ -152,7 +151,6 @@ def export_history_xlsx(
                 "base_yield",
                 "stressed_yield",
                 "discount_factor",
-                "discount_convention",
                 "scenario_version",
             ]
         )
@@ -170,7 +168,6 @@ def export_history_xlsx(
                         point.tenor,
                         point.yield_rate,
                         point.discount_factor,
-                        point.discount_convention,
                         point.is_interpolated,
                         point.is_extrapolated,
                         point.is_deleted,
@@ -192,7 +189,6 @@ def export_history_xlsx(
                             base_by_tenor[point.tenor].yield_rate,
                             point.stressed_yield,
                             point.discount_factor,
-                            point.discount_convention,
                             curve.parameters.version,
                         )
                     ]
@@ -300,7 +296,7 @@ def main(run_dir, input_file, xlsx, shock_bps):
             f"Интерполировано: {sum(point.is_interpolated for point in points)}; экстраполировано: {sum(point.is_extrapolated for point in points)}"
         )
         click.echo(
-            f"Соглашение: annual_effective_v1; версия сценариев: {parameters.version}"
+            f"Дисконтирование: годовая капитализация; версия сценариев: {parameters.version}"
         )
         if xlsx is not None:
             export_history_xlsx(history, xlsx)

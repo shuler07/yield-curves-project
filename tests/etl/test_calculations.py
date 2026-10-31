@@ -8,7 +8,6 @@ import pytest
 
 from src.etl.calculations import (
     SCENARIOS,
-    DiscountConvention,
     RawSnapshot,
     ScenarioParameters,
     calculate_scenarios,
@@ -49,12 +48,6 @@ def test_annual_discount_uses_fractional_rates_and_fractional_years():
     assert discount_factor(Decimal("-0.01"), Decimal(1)) > 1
 
 
-def test_explicit_continuous_convention_is_distinct_from_moex_spot_convention():
-    result = discount_factor(Decimal("0.1"), Decimal(1), DiscountConvention.CONTINUOUS)
-    assert_close(result, "0.90483741803595957316424905944643662119")
-    assert result != discount_factor(Decimal("0.1"), Decimal(1))
-
-
 @pytest.mark.parametrize(
     "rate,tenor",
     [
@@ -91,9 +84,6 @@ def test_restore_rates_and_flags_using_original_neighbouring_points_only():
     assert not points[Decimal(1)].is_interpolated
     assert not points[Decimal(1)].is_extrapolated
     assert not any(point.is_deleted for point in points.values())
-    assert all(
-        point.discount_convention == "annual_effective_v1" for point in points.values()
-    )
     assert points[Decimal(5)].yield_rate == Decimal("0.14")
 
 

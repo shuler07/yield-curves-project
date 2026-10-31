@@ -99,7 +99,11 @@ def test_excel_export_preserves_calculation_precision_and_source_csv(
         assert sheet.max_row == 49
         assert sheet["D2"].value == pytest.approx(0.1309)
         assert sheet["D2"].number_format == "0.00%"
-        assert sheet["F2"].value == "annual_effective_v1"
+        assert sheet["F2"].value is False
+        assert "discount_convention" not in [cell.value for cell in sheet[1]]
+        assert "discount_convention" not in [
+            cell.value for cell in workbook["Parallel_Up"][1]
+        ]
         assert workbook["Parallel_Up"]["E2"].value == pytest.approx(0.1709)
         assert workbook["Parameters"].max_row == 7
     finally:
