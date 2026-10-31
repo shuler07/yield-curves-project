@@ -79,11 +79,10 @@ def discount_factor(
 
 @dataclass(frozen=True)
 class ScenarioParameters:
-    # Preserve the project's original calibration; these are not a declaration
-    # of current regulatory RUB shock amplitudes.
+    # RUB amplitudes from the scenario table supplied by the project curator.
     parallel_bps: Decimal = Decimal(400)
-    short_bps: Decimal = Decimal(400)
-    long_bps: Decimal = Decimal(400)
+    short_bps: Decimal = Decimal(500)
+    long_bps: Decimal = Decimal(300)
     decay_years: Decimal = Decimal(4)
     steepener_short: Decimal = Decimal("0.65")
     steepener_long: Decimal = Decimal("0.9")

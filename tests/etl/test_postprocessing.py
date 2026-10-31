@@ -7,7 +7,7 @@ import pytest
 from click.testing import CliRunner
 from openpyxl import load_workbook
 
-from src.etl.calculations import SCENARIOS
+from src.etl.calculations import SCENARIOS, ScenarioParameters
 from src.etl.common import OUTPUT_NAME, TERMS, DataValidationError, DateRange
 from src.etl.merge import extract_and_merge
 from src.etl.postprocessing import (
@@ -81,6 +81,7 @@ def test_cli_uses_explicit_run_directory_without_writing_files(merged_file):
     assert result.exit_code == 0, result.output
     assert "базовых точек: 48" in result.output
     assert "стрессовых точек: 288" in result.output
+    assert ScenarioParameters().version in result.output
     assert set(merged_file.parent.iterdir()) == before
 
 

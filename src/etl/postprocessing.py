@@ -275,9 +275,8 @@ def generate_irrbb_history(
 )
 @click.option(
     "--shock-bps",
-    default="400",
-    show_default=True,
-    help="Общая амплитуда трёх видов шока, базисные пункты.",
+    default=None,
+    help="Явно задать одинаковый шок для всех трёх типов, б.п.; без ключа RUB: 400/500/300.",
 )
 def main(run_dir, input_file, xlsx, shock_bps):
     """Рассчитать базовую и шесть стрессовых кривых в памяти; CSV не изменяется."""
@@ -285,8 +284,12 @@ def main(run_dir, input_file, xlsx, shock_bps):
         raise click.UsageError("Нужен либо --run-dir, либо --input")
     source = run_dir / OUTPUT_NAME if run_dir is not None else input_file
     try:
-        parameters = ScenarioParameters(
-            parallel_bps=shock_bps, short_bps=shock_bps, long_bps=shock_bps
+        parameters = (
+            ScenarioParameters()
+            if shock_bps is None
+            else ScenarioParameters(
+                parallel_bps=shock_bps, short_bps=shock_bps, long_bps=shock_bps
+            )
         )
         history = calculate_history(source, parameters)
         click.echo(

@@ -41,7 +41,9 @@ process.stdout.write(result);
         {term: Decimal(str(base_percent)) / 100 for term in TERMS},
     )
     params = ScenarioParameters(
-        parallel_bps=shock_bps, short_bps=shock_bps, long_bps=shock_bps
+        parallel_bps=shock_bps,
+        short_bps=Decimal(shock_bps) * Decimal("1.25"),
+        long_bps=Decimal(shock_bps) * Decimal("0.75"),
     )
     calculated = calculate_snapshot(raw, params)
     for curve, key in zip(

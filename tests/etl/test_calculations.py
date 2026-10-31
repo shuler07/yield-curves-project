@@ -153,27 +153,27 @@ def test_six_scenarios_and_their_own_discount_factors():
         ).stressed_yield
         for curve in result.scenarios
     }
-    assert_close(at_four["Short_Up"], Decimal("0.1") + Decimal("0.04") * decay, "1e-27")
+    assert_close(at_four["Short_Up"], Decimal("0.1") + Decimal("0.05") * decay, "1e-27")
     assert_close(
-        at_four["Short_Down"], Decimal("0.1") - Decimal("0.04") * decay, "1e-27"
+        at_four["Short_Down"], Decimal("0.1") - Decimal("0.05") * decay, "1e-27"
     )
     assert_close(
         at_four["Steepener"],
-        Decimal("0.1") - Decimal("0.026") * decay + Decimal("0.036") * (1 - decay),
+        Decimal("0.1") - Decimal("0.0325") * decay + Decimal("0.027") * (1 - decay),
         "1e-27",
     )
     assert_close(
         at_four["Flattener"],
-        Decimal("0.1") + Decimal("0.032") * decay - Decimal("0.024") * (1 - decay),
+        Decimal("0.1") + Decimal("0.04") * decay - Decimal("0.018") * (1 - decay),
         "1e-27",
     )
 
 
 def test_independent_short_long_amplitudes():
-    params = ScenarioParameters(short_bps=500, long_bps=300, parallel_bps=400)
+    params = ScenarioParameters(short_bps=600, long_bps=200, parallel_bps=400)
     curves = calculate_scenarios(prepare_base_curve(snapshot()), params)
     point = next(p for p in curves[2].points if p.tenor == 4)
-    assert_close(point.stressed_yield, "0.11839397205857211607977618850807304337")
+    assert_close(point.stressed_yield, "0.12207276647028653929573142620968765205")
     assert curves[0].points[0].stressed_yield == Decimal("0.14")
 
 
@@ -199,12 +199,14 @@ def test_floor_is_applied_to_all_scenarios_but_not_baseline():
 def test_scenario_parameter_versions_are_reproducible_and_json_serializable():
     params = ScenarioParameters()
     assert params.version == ScenarioParameters(parallel_bps=Decimal("400.00")).version
-    assert params.version != ScenarioParameters(short_bps=500).version
+    assert params.version != ScenarioParameters(short_bps=450).version
     assert params.version != ScenarioParameters(floor=None).version
     definition = calculate_snapshot(snapshot(), params).scenarios[0].definition_record()
     assert definition["scenario"] == "Parallel_Up"
     assert definition["version"] == params.version
     assert definition["parameters"]["parallel_bps"] == "400"
+    assert definition["parameters"]["short_bps"] == "500"
+    assert definition["parameters"]["long_bps"] == "300"
     assert definition["parameters"]["floor"] == "0"
     import json
 

@@ -81,14 +81,14 @@
         <h2>Математические формулы сдвигов</h2>
         <p>В основе непараллельных шоков лежит функция экспоненциального затухания, зависящая от срока \( t \) (в годах):</p>
         <p>\( S(t) = e^{-\frac{t}{4}} \)</p>
-        <p>Параметры проекта: общий шок по умолчанию 400 б.п.; для всех шести сценариев итоговая ставка ограничена снизу 0%: \( R_s(t) = \max(0, R_{base}(t) + \Delta R_s(t)) \). Базовая кривая не ограничивается.</p>
+        <p>RUB по таблице куратора: параллельный шок 400 б.п., короткий 500 б.п., длинный 300 б.п. Итоговая ставка всех шести сценариев ограничена снизу 0%: \( R_s(t) = \max(0, R_{base}(t) + \Delta R_s(t)) \). Базовая кривая не ограничивается.</p>
         <hr>
         <p><strong>1. Parallel Up (Параллельный сдвиг вверх):</strong> \( \Delta R_{up}(t) = +\bar{R}_{shock} \)</p>
         <p><strong>2. Parallel Down (Параллельный сдвиг вниз):</strong> \( \Delta R_{down}(t) = -\bar{R}_{shock} \)</p>
-        <p><strong>3. Short Rates Up (Рост коротких ставок):</strong> \( \Delta R_{short\_up}(t) = +\bar{R}_{shock} \cdot S(t) \)</p>
-        <p><strong>4. Short Rates Down (Падение коротких ставок):</strong> \( \Delta R_{short\_down}(t) = -\bar{R}_{shock} \cdot S(t) \)</p>
-        <p><strong>5. Steepener (Укручение кривой):</strong> \( \Delta R_{steep}(t) = -0.65 \cdot \bar{R}_{shock} \cdot S(t) + 0.9 \cdot \bar{R}_{shock} \cdot (1 - S(t)) \)</p>
-        <p><strong>6. Flattener (Уплощение кривой):</strong> \( \Delta R_{flat}(t) = +0.8 \cdot \bar{R}_{shock} \cdot S(t) - 0.6 \cdot \bar{R}_{shock} \cdot (1 - S(t)) \)</p>
+        <p><strong>3. Short Rates Up (Рост коротких ставок):</strong> \( \Delta R_{short\_up}(t) = +\bar{R}_{short} \cdot S(t) \)</p>
+        <p><strong>4. Short Rates Down (Падение коротких ставок):</strong> \( \Delta R_{short\_down}(t) = -\bar{R}_{short} \cdot S(t) \)</p>
+        <p><strong>5. Steepener (Укручение кривой):</strong> \( \Delta R_{steep}(t) = -0.65 \cdot \bar{R}_{short} \cdot S(t) + 0.9 \cdot \bar{R}_{long} \cdot (1 - S(t)) \)</p>
+        <p><strong>6. Flattener (Уплощение кривой):</strong> \( \Delta R_{flat}(t) = +0.8 \cdot \bar{R}_{short} \cdot S(t) - 0.6 \cdot \bar{R}_{long} \cdot (1 - S(t)) \)</p>
     </div>
 
     <div class="controls">
@@ -106,7 +106,7 @@
         </div>
 
         <div class="control-group">
-            <label for="shockSlider"><strong>Базовый шок (\( \bar{R}_{shock} \)):</strong></label>
+            <label for="shockSlider"><strong>Параллельный шок (короткий ×1.25, длинный ×0.75):</strong></label>
             <input type="range" id="shockSlider" min="100" max="800" step="50" value="400">
             <span class="shock-value"><span id="shockDisplay">400</span> б.п.</span>
         </div>
@@ -124,6 +124,8 @@
 
     function calculateScenarios(shock_bp) {
         const shock = shock_bp / 100.0;
+        const shortShock = shock * 1.25;
+        const longShock = shock * 0.75;
         let datasets = {
             parallelUp: [], parallelDown: [],
             shortUp: [], shortDown: [],
@@ -138,10 +140,10 @@
 
             datasets.parallelUp.push(applyShock(shock));
             datasets.parallelDown.push(applyShock(-shock));
-            datasets.shortUp.push(applyShock(shock * st));
-            datasets.shortDown.push(applyShock(-shock * st));
-            datasets.steepener.push(applyShock(-0.65 * shock * st + 0.9 * shock * (1 - st)));
-            datasets.flattener.push(applyShock(0.8 * shock * st - 0.6 * shock * (1 - st)));
+            datasets.shortUp.push(applyShock(shortShock * st));
+            datasets.shortDown.push(applyShock(-shortShock * st));
+            datasets.steepener.push(applyShock(-0.65 * shortShock * st + 0.9 * longShock * (1 - st)));
+            datasets.flattener.push(applyShock(0.8 * shortShock * st - 0.6 * longShock * (1 - st)));
         }
         return datasets;
     }
