@@ -24,7 +24,7 @@ def migrated_db():
     previous = os.environ.get("DATABASE_URL")
     test_url = url.update_query_dict({"options": f"-csearch_path={schema}"})
     os.environ["DATABASE_URL"] = test_url.render_as_string(hide_password=False)
-    config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     engine = create_engine(test_url)
     try:
         command.upgrade(config, "head")
