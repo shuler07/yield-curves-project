@@ -257,8 +257,17 @@ def test_records_match_database_columns_without_mutating_results():
     assert base_record["is_extrapolated"] is True
     assert base_record["is_interpolated"] is False
     assert base_record["etl_run_id"] == run_id
-    record = result.scenarios[0].points[0].record(123, 456, run_id)
-    assert record["curve_point_id"] == 123
-    assert record["stress_shock_id"] == 456
-    assert "tenor" not in record
+    record = (
+        result.scenarios[0]
+        .points[0]
+        .record(
+            result.base_points[0],
+            "Parallel_Up",
+            result.scenarios[0].parameters.version,
+            run_id,
+        )
+    )
+    assert record["scenario"] == "Parallel_Up"
+    assert record["scenario_version"] == result.scenarios[0].parameters.version
+    assert record["tenor"] == result.base_points[0].tenor
     assert result == before

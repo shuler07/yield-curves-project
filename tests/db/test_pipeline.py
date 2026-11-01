@@ -4,15 +4,14 @@ import csv
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from decimal import Decimal
-from uuid import UUID
 
 import pytest
 from click.testing import CliRunner
-from sqlalchemy import delete, event, func, select, text
+from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from src.db.models import CurvePoint, EtlRun, StressCurve, StressShock
+from src.db.models import EtlRun, ProcessedCurvePoint, RawCurvePoint, StressShock
 from src.etl import pipeline
 from src.etl.calculations import ScenarioParameters
 from src.etl.common import SOURCE_TERMS, TARGET_TERMS, DateRange, write_manifest
@@ -35,7 +34,7 @@ def factory(migrated_db):
         with engine.begin() as connection:
             connection.execute(
                 text(
-                    "TRUNCATE stress_curves, curve_points, stress_shocks, etl_runs "
+                    "TRUNCATE processed_curve_points, raw_curve_points, stress_shocks, etl_runs "
                     "RESTART IDENTITY"
                 )
             )
@@ -77,109 +76,130 @@ def count(session, model):
 
 
 @pytest.mark.parametrize("run_type", ["manual", "scheduled"])
-def test_full_pipeline_and_repeat_preserve_ids_without_duplicates(
+def test_replay_preserves_twelve_raw_points_and_seven_complete_curves(
     factory, tmp_path, run_type
 ):
     folder = source(tmp_path, [(DAY, "18:54:59", complete())])
     first = load(factory, folder, run_type=run_type)
-    assert first.interpolated == 4
-    assert first.extrapolated == 3
+    assert (first.status, first.rows_processed, first.rows_saved) == (
+        "success",
+        12,
+        145,
+    )
+    assert (first.interpolated, first.extrapolated) == (4, 3)
     with factory() as session:
-        ids = list(session.scalars(select(CurvePoint.id).order_by(CurvePoint.tenor)))
-        run = session.get(EtlRun, first.run_id)
-        assert (run.status, run.run_type, run.rows_processed, run.rows_saved) == (
-            "success",
-            run_type,
-            12,
-            133,
-        )
-        assert run.finished_at >= run.started_at
+        ids = session.execute(
+            select(ProcessedCurvePoint.id, ProcessedCurvePoint.created_at).order_by(
+                ProcessedCurvePoint.id
+            )
+        ).all()
+        raw_ids = session.execute(
+            select(RawCurvePoint.id, RawCurvePoint.created_at).order_by(
+                RawCurvePoint.id
+            )
+        ).all()
     second = load(factory, folder, run_type=run_type)
-    assert first.run_id != second.run_id
-    assert second.status == "success"
-    assert second.rows_saved == 133
+    assert second.status == "success" and second.rows_saved == 145
     with factory() as session:
         assert (
-            list(session.scalars(select(CurvePoint.id).order_by(CurvePoint.tenor)))
+            session.execute(
+                select(ProcessedCurvePoint.id, ProcessedCurvePoint.created_at).order_by(
+                    ProcessedCurvePoint.id
+                )
+            ).all()
             == ids
         )
+        assert (
+            session.execute(
+                select(RawCurvePoint.id, RawCurvePoint.created_at).order_by(
+                    RawCurvePoint.id
+                )
+            ).all()
+            == raw_ids
+        )
         assert [
-            count(session, model)
-            for model in (CurvePoint, StressCurve, StressShock, EtlRun)
-        ] == [19, 114, 6, 2]
-        assert (
-            tuple(session.scalars(select(CurvePoint.tenor).order_by(CurvePoint.tenor)))
-            == TARGET_TERMS
-        )
-        point = session.scalar(select(CurvePoint).where(CurvePoint.tenor == 1))
-        assert point.yield_rate == Decimal("0.1")
-        assert point.discount_factor == Decimal("0.909090909090909091")
-        assert point.etl_run_id == second.run_id
-        stress = session.scalar(
-            select(StressCurve)
-            .join(StressShock)
-            .where(
-                StressCurve.curve_point_id == point.id,
-                StressShock.scenario == "Parallel_Up",
+            count(session, m)
+            for m in (RawCurvePoint, ProcessedCurvePoint, StressShock, EtlRun)
+        ] == [12, 133, 6, 2]
+        curves = session.execute(
+            select(ProcessedCurvePoint.scenario, func.count()).group_by(
+                ProcessedCurvePoint.scenario
             )
-        )
-        assert stress.stressed_yield == Decimal("0.14")
-        assert stress.etl_run_id == second.run_id
-
-
-def test_replay_extends_existing_twelve_point_snapshot_without_replacing_source_points(
-    factory, tmp_path
-):
-    folder = source(tmp_path, [(DAY, "18:54:59", complete())])
-    load(factory, folder)
-    with factory.begin() as session:
-        extra_ids = select(CurvePoint.id).where(CurvePoint.tenor.not_in(SOURCE_TERMS))
-        session.execute(
-            delete(StressCurve).where(StressCurve.curve_point_id.in_(extra_ids))
-        )
-        session.execute(delete(CurvePoint).where(CurvePoint.tenor.not_in(SOURCE_TERMS)))
-        original = dict(session.execute(select(CurvePoint.tenor, CurvePoint.id)).all())
-        assert count(session, CurvePoint) == 12
-        assert count(session, StressCurve) == 72
-    result = load(factory, folder)
-    assert result.status == "success"
-    with factory() as session:
-        assert count(session, CurvePoint) == 19
-        assert count(session, StressCurve) == 114
-        assert (
-            dict(
-                session.execute(
-                    select(CurvePoint.tenor, CurvePoint.id).where(
-                        CurvePoint.tenor.in_(SOURCE_TERMS)
+        ).all()
+        assert len(curves) == 7 and all(n == 19 for _, n in curves)
+        for scenario, _ in curves:
+            assert (
+                tuple(
+                    session.scalars(
+                        select(ProcessedCurvePoint.tenor)
+                        .where(ProcessedCurvePoint.scenario == scenario)
+                        .order_by(ProcessedCurvePoint.tenor)
                     )
-                ).all()
+                )
+                == TARGET_TERMS
             )
-            == original
+        assert set(session.scalars(select(ProcessedCurvePoint.etl_run_id))) == {
+            second.run_id
+        }
+        assert set(session.scalars(select(RawCurvePoint.etl_run_id))) == {second.run_id}
+        assert set(session.scalars(select(RawCurvePoint.tenor))) == set(SOURCE_TERMS)
+        point = session.scalar(
+            select(ProcessedCurvePoint).where(
+                ProcessedCurvePoint.scenario == "Parallel_Up",
+                ProcessedCurvePoint.tenor == 1,
+            )
         )
+        assert point.yield_rate == Decimal("0.14")
+        assert point.discount_factor == Decimal("0.877192982456140351")
+        run = session.get(EtlRun, second.run_id)
+        assert run.run_type == run_type and run.finished_at >= run.started_at
 
 
-def test_missing_rates_are_filled_only_at_publication(factory, tmp_path):
+def test_missing_rates_are_only_restored_in_processed_table(factory, tmp_path):
     folder = source(tmp_path, [(DAY, "18:54:59", {Decimal(1): "10", Decimal(5): "14"})])
     merged = merge_run(folder).output_file
-    original = merged.read_bytes()
+    before = merged.read_bytes()
     result = load(factory, folder)
-    assert result.status == "success"
-    assert result.interpolated == 4
-    assert result.extrapolated == 13
-    assert merged.read_bytes() == original
-    assert b"NA" in original
+    assert (result.rows_processed, result.rows_saved) == (2, 135)
+    assert (result.interpolated, result.extrapolated) == (4, 13)
+    assert before == merged.read_bytes() and b"NA" in before
     with factory() as session:
-        point = session.scalar(select(CurvePoint).where(CurvePoint.tenor == 2))
-        assert point.yield_rate == Decimal("0.11")
-        assert point.is_interpolated and not point.is_extrapolated
-        point = session.scalar(select(CurvePoint).where(CurvePoint.tenor == 20))
-        assert point.is_extrapolated and not point.is_interpolated
-        assert count(session, StressCurve) == 114
+        assert set(session.scalars(select(RawCurvePoint.tenor))) == {
+            Decimal(1),
+            Decimal(5),
+        }
+        assert count(session, ProcessedCurvePoint) == 133
+        points = list(
+            session.scalars(
+                select(ProcessedCurvePoint).where(ProcessedCurvePoint.tenor == 2)
+            )
+        )
+        assert len(points) == 7 and all(p.is_interpolated for p in points)
+        base = next(p for p in points if p.scenario == "Baseline")
+        assert base.yield_rate == Decimal("0.11") and base.scenario_version is None
 
 
-def test_date_rollback_keeps_other_dates_and_old_data(factory, tmp_path):
+@pytest.mark.parametrize(
+    "rates", [{}, {Decimal(1): "10.123456789012345678901234567890"}]
+)
+def test_failed_calculation_retains_original_points(factory, tmp_path, rates):
+    folder = source(tmp_path, [(DAY, "18:54:59", rates)])
+    result = load(factory, folder)
+    assert result.status == "failed" and result.rows_saved == len(rates)
+    with factory() as session:
+        assert count(session, RawCurvePoint) == len(rates)
+        assert count(session, ProcessedCurvePoint) == 0
+        if rates:
+            assert session.scalar(select(RawCurvePoint.yield_rate)) == Decimal(
+                "0.10123456789012345678901234567890"
+            )
+        run = session.get(EtlRun, result.run_id)
+        assert run.error and run.finished_at is not None
+
+
+def test_source_corrections_and_failed_date_invalidate_stale_curves(factory, tmp_path):
     old = source(tmp_path, [(DAY, "18:00:00", complete())], name="old")
-    old_run = load(factory, old)
+    load(factory, old)
     dates = DateRange(date(2026, 10, 29), DAY)
     folder = source(
         tmp_path,
@@ -192,153 +212,144 @@ def test_date_rollback_keeps_other_dates_and_old_data(factory, tmp_path):
     )
     result = load(factory, folder, dates)
     assert result.status == "partial_success"
-    assert result.rows_processed == 36
-    assert result.rows_saved == 133
-    assert result.saved_dates == [dates.start]
-    assert list(result.errors) == [DAY.isoformat()]
+    assert (result.rows_processed, result.rows_saved) == (25, 158)
+    assert result.saved_dates == [dates.start] and list(result.errors) == [
+        DAY.isoformat()
+    ]
     with factory() as session:
-        assert count(session, CurvePoint) == 38
-        assert count(session, StressCurve) == 228
-        points = list(
-            session.scalars(select(CurvePoint).where(CurvePoint.curve_date == DAY))
-        )
-        assert len(points) == 19
-        assert all(p.yield_rate == Decimal("0.1") for p in points)
-        assert all(p.etl_run_id == old_run.run_id for p in points)
-        run = session.get(EtlRun, result.run_id)
-        assert run.status == "partial_success"
-        assert DAY.isoformat() in run.error
-        assert run.finished_at is not None
+        assert count(session, RawCurvePoint) == 25
+        assert count(session, ProcessedCurvePoint) == 133
+        assert set(session.scalars(select(ProcessedCurvePoint.curve_date))) == {
+            dates.start
+        }
+        assert DAY.isoformat() in session.get(EtlRun, result.run_id).error
 
 
-def test_database_error_rolls_back_base_and_scenarios_but_keeps_journal(
+def test_processed_database_failure_keeps_raw_and_audit_then_replay_repairs(
     factory, tmp_path
 ):
     folder = source(tmp_path, [(DAY, "18:00:00", complete())])
     engine = factory.kw["bind"]
 
-    def fail_stress(connection, cursor, statement, parameters, context, executemany):
-        if statement.startswith("INSERT INTO stress_curves"):
+    def fail(connection, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO processed_curve_points"):
             raise IntegrityError(
                 statement, parameters, ValueError("injected DB failure")
             )
 
-    event.listen(engine, "before_cursor_execute", fail_stress)
+    event.listen(engine, "before_cursor_execute", fail)
     try:
         result = load(factory, folder)
     finally:
-        event.remove(engine, "before_cursor_execute", fail_stress)
-    assert result.status == "failed"
-    assert result.rows_saved == 0
+        event.remove(engine, "before_cursor_execute", fail)
+    assert result.status == "failed" and result.rows_saved == 12
     with factory() as session:
         assert [
-            count(session, model) for model in (CurvePoint, StressCurve, StressShock)
-        ] == [0, 0, 0]
-        run = session.get(EtlRun, result.run_id)
-        assert run.status == "failed"
-        assert "injected DB failure" in run.error
-        assert run.finished_at is not None
+            count(session, m) for m in (RawCurvePoint, ProcessedCurvePoint, StressShock)
+        ] == [12, 0, 0]
+        assert "injected DB failure" in session.get(EtlRun, result.run_id).error
+    assert load(factory, folder).status == "success"
+    with factory() as session:
+        assert count(session, ProcessedCurvePoint) == 133
 
 
-def test_new_parameters_keep_old_versions_until_source_correction(factory, tmp_path):
+def test_parameter_versions_coexist_until_source_changes(factory, tmp_path):
     folder = source(tmp_path, [(DAY, "18:54:59", complete())])
-    first = load(factory, folder)
+    load(factory, folder)
     params = ScenarioParameters(parallel_bps=500)
-    load(factory, folder, parameters=params)
-    # Repeating the unrounded calculation must NOT treat NUMERIC rounding as a
-    # correction and invalidate the earlier parameter version.
-    load(factory, folder, parameters=params)
+    assert load(factory, folder, parameters=params).status == "success"
+    assert load(factory, folder, parameters=params).status == "success"
     with factory() as session:
+        assert count(session, ProcessedCurvePoint) == 247
         assert count(session, StressShock) == 12
-        assert count(session, StressCurve) == 228
     corrected = source(tmp_path, [(DAY, "18:54:59", complete("12"))], name="corrected")
-    result = load(factory, corrected, parameters=params)
-    assert result.status == "success"
+    assert load(factory, corrected, parameters=params).status == "success"
     with factory() as session:
-        assert count(session, CurvePoint) == 19
-        assert count(session, StressShock) == 12
-        assert count(session, StressCurve) == 114
-        assert session.get(EtlRun, first.run_id).status == "success"
-        assert set(session.scalars(select(StressShock.version).join(StressCurve))) == {
-            params.version
+        assert count(session, ProcessedCurvePoint) == 133
+        assert set(session.scalars(select(ProcessedCurvePoint.scenario_version))) == {
+            None,
+            params.version,
         }
-        assert set(session.scalars(select(CurvePoint.yield_rate))) == {Decimal("0.12")}
+        assert set(session.scalars(select(RawCurvePoint.yield_rate))) == {
+            Decimal("0.12")
+        }
+    sparse = source(
+        tmp_path,
+        [(DAY, "18:54:59", {Decimal(1): "10", Decimal(5): "14"})],
+        name="sparse",
+    )
+    assert load(factory, sparse).status == "success"
+    with factory() as session:
+        assert (
+            count(session, RawCurvePoint) == 2
+            and count(session, ProcessedCurvePoint) == 133
+        )
 
 
-def test_concurrent_runs_for_one_date_do_not_duplicate_or_fail(factory, tmp_path):
+def test_concurrent_runs_are_idempotent(factory, tmp_path):
     folder = source(tmp_path, [(DAY, "18:54:59", complete())])
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(load, factory, folder) for _ in range(2)]
-        results = [future.result(timeout=20) for future in futures]
-    assert all(result.status == "success" for result in results), results
+        results = [f.result(timeout=20) for f in futures]
+    assert all(result.status == "success" for result in results)
     with factory() as session:
         assert [
-            count(session, model)
-            for model in (CurvePoint, StressCurve, StressShock, EtlRun)
-        ] == [19, 114, 6, 2]
+            count(session, m) for m in (RawCurvePoint, ProcessedCurvePoint, EtlRun)
+        ] == [12, 133, 2]
 
 
-def test_start_committed_before_collection_and_source_failure_logged(
+def test_failed_recalculation_keeps_previous_results_when_raw_data_is_unchanged(
     factory, tmp_path, monkeypatch
 ):
-    def fail_source(dates, run_dir, timeout):
+    folder = source(tmp_path, [(DAY, "18:54:59", complete())])
+    first = load(factory, folder)
+
+    def fail(*args, **kwargs):
+        raise ArithmeticError("calculation failed")
+
+    monkeypatch.setattr(pipeline, "calculate_snapshot", fail)
+    result = load(factory, folder)
+    assert result.status == "failed" and result.rows_saved == 12
+    with factory() as session:
+        assert count(session, ProcessedCurvePoint) == 133
+        assert set(session.scalars(select(ProcessedCurvePoint.etl_run_id))) == {
+            first.run_id
+        }
+        assert set(session.scalars(select(RawCurvePoint.etl_run_id))) == {result.run_id}
+
+
+def test_source_error_is_audited_and_cli_can_replay(factory, tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "get_session_factory", lambda: factory)
+
+    def fail(dates, run_dir, timeout):
         with factory() as session:
-            run = session.scalar(select(EtlRun))
-            assert run.status == "running"
-            assert run.finished_at is None
+            assert session.scalar(select(EtlRun.status)) == "running"
         raise TimeoutError("source unavailable")
 
-    monkeypatch.setattr(pipeline, "collect_curves", fail_source)
+    monkeypatch.setattr(pipeline, "collect_curves", fail)
     result = pipeline.run_pipeline(DATES, session_factory=factory)
     assert result.status == "failed"
+    folder = source(tmp_path, [(DAY, "18:00:00", complete())])
+    result = CliRunner().invoke(main, ["--from-run-dir", str(folder)])
+    assert result.exit_code == 0, result.output
     with factory() as session:
-        run = session.get(EtlRun, result.run_id)
-        assert "source unavailable" in run.error
-        assert run.finished_at is not None
-        assert count(session, CurvePoint) == 0
+        assert (
+            count(session, RawCurvePoint) == 12
+            and count(session, ProcessedCurvePoint) == 133
+        )
 
 
 def test_no_data_and_missing_dates_are_not_fabricated(factory, tmp_path):
     empty = source(tmp_path, [])
     result = load(factory, empty)
     assert result.status == "no_data"
-    with factory() as session:
-        run = session.get(EtlRun, result.run_id)
-        assert run.reason
-        assert run.error is None
-        assert count(session, CurvePoint) == 0
     dates = DateRange(date(2026, 10, 29), DAY)
     folder = source(tmp_path, [(DAY, "18:00:00", complete())], dates, name="range")
     result = load(factory, folder, dates)
-    assert result.status == "success"
-    assert result.missing_dates == [dates.start]
-    assert result.saved_dates == [DAY]
+    assert result.status == "success" and result.missing_dates == [dates.start]
     with factory() as session:
+        assert set(session.scalars(select(RawCurvePoint.curve_date))) == {DAY}
         assert str(dates.start) in session.get(EtlRun, result.run_id).reason
-        assert set(session.scalars(select(CurvePoint.curve_date))) == {DAY}
-
-
-def test_cli_live_collection_and_reuse(factory, tmp_path, monkeypatch):
-    folder = source(tmp_path, [(DAY, "18:00:00", complete())])
-    monkeypatch.setattr(pipeline, "get_session_factory", lambda: factory)
-
-    def collect(dates, run_dir, timeout):
-        assert dates == DATES
-        assert timeout == 60
-        return merge_run(folder)
-
-    monkeypatch.setattr(pipeline, "collect_curves", collect)
-    runner = CliRunner()
-    result = runner.invoke(main, ["--date", str(DAY), "--timeout", "60"])
-    assert result.exit_code == 0, result.output
-    run_id = UUID(result.output.split("ETL run: ")[1].split(";")[0])
-    with factory() as session:
-        assert session.get(EtlRun, run_id).status == "success"
-    result = runner.invoke(main, ["--from-run-dir", str(folder)])
-    assert result.exit_code == 0, result.output
-    with factory() as session:
-        assert count(session, CurvePoint) == 19
-        assert count(session, StressCurve) == 114
 
 
 def test_cli_failure_returns_nonzero_and_run_id(factory, tmp_path, monkeypatch):

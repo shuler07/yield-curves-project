@@ -122,6 +122,20 @@ class RawSnapshot:
     quote_time: time
     rates: Mapping[Decimal, Decimal | None]
 
+    def records(self, etl_run_id: UUID) -> list[dict]:
+        """Observed rates only, in fractions; missing CSV cells are not DB rows."""
+        return [
+            {
+                "curve_date": self.curve_date,
+                "quote_time": self.quote_time,
+                "tenor": tenor,
+                "yield_rate": rate,
+                "etl_run_id": etl_run_id,
+            }
+            for tenor, rate in sorted(self.rates.items())
+            if rate is not None
+        ]
+
 
 @dataclass(frozen=True)
 class BasePoint:
@@ -135,7 +149,12 @@ class BasePoint:
     is_deleted: bool = False
 
     def record(self, etl_run_id: UUID) -> dict:
-        return {**asdict(self), "etl_run_id": etl_run_id}
+        return {
+            **asdict(self),
+            "scenario": "Baseline",
+            "scenario_version": None,
+            "etl_run_id": etl_run_id,
+        }
 
 
 @dataclass(frozen=True)
@@ -145,13 +164,19 @@ class StressPoint:
     discount_factor: Decimal
 
     def record(
-        self, curve_point_id: int, stress_shock_id: int, etl_run_id: UUID
+        self, base: BasePoint, scenario: str, version: str, etl_run_id: UUID
     ) -> dict:
         return {
-            "curve_point_id": curve_point_id,
-            "stress_shock_id": stress_shock_id,
-            "stressed_yield": self.stressed_yield,
+            "curve_date": base.curve_date,
+            "quote_time": base.quote_time,
+            "tenor": self.tenor,
+            "scenario": scenario,
+            "scenario_version": version,
+            "yield_rate": self.stressed_yield,
             "discount_factor": self.discount_factor,
+            "is_interpolated": base.is_interpolated,
+            "is_extrapolated": base.is_extrapolated,
+            "is_deleted": base.is_deleted,
             "etl_run_id": etl_run_id,
         }
 

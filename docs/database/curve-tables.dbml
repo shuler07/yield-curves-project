@@ -1,0 +1,44 @@
+// Replace curve_points and stress_curves. Keep etl_runs and stress_shocks.
+
+Table raw_curve_points {
+  id bigint [pk, increment]
+  curve_date date [not null]
+  quote_time time [not null, note: 'Moscow time']
+  tenor numeric(12,6) [not null, note: 'Positive finite years']
+  yield_rate numeric [not null, note: 'Original finite rate as a fraction; no fixed scale']
+  etl_run_id uuid [not null]
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (curve_date, quote_time, tenor) [unique, name: 'uq_raw_curve_points_snapshot_tenor']
+    etl_run_id [name: 'ix_raw_curve_points_etl_run_id']
+  }
+  Note: 'Observed MOEX rates only. Missing rates have no row; no interpolation or discount factors.'
+}
+
+Table processed_curve_points {
+  id bigint [pk, increment]
+  curve_date date [not null]
+  quote_time time [not null, note: 'Moscow time']
+  tenor numeric(12,6) [not null, note: 'Positive finite years']
+  scenario varchar(32) [not null, note: 'Baseline, Parallel_Up, Parallel_Down, Short_Up, Short_Down, Steepener, Flattener']
+  scenario_version varchar(64) [note: 'NULL only for Baseline; required for stress scenarios']
+  yield_rate numeric(18,10) [not null, note: 'Finite rate as a fraction']
+  discount_factor numeric(28,18) [not null, note: 'Positive and finite; annual compounding']
+  etl_run_id uuid [not null]
+  created_at timestamptz [not null, default: `now()`]
+  is_interpolated boolean [not null, default: false]
+  is_extrapolated boolean [not null, default: false]
+  is_deleted boolean [not null, default: false]
+
+  indexes {
+    (curve_date, quote_time, tenor, scenario, scenario_version) [unique, name: 'uq_processed_curve_points_key']
+    etl_run_id [name: 'ix_processed_curve_points_etl_run_id']
+    (scenario, scenario_version, curve_date, quote_time, tenor) [name: 'ix_processed_curve_points_scenario']
+  }
+  Note: 'PostgreSQL UNIQUE NULLS NOT DISTINCT: duplicate Baseline points are forbidden even with NULL version. One default snapshot: 19 points x 7 curves = 133 rows. Flags describe recovery of the underlying baseline rate.'
+}
+
+Ref: raw_curve_points.etl_run_id > etl_runs.id [delete: restrict]
+Ref: processed_curve_points.etl_run_id > etl_runs.id [delete: restrict]
+Ref: processed_curve_points.(scenario, scenario_version) > stress_shocks.(scenario, version) [delete: restrict]

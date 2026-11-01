@@ -5,10 +5,10 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from sqlalchemy import func, inspect, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
-from src.db.models import CurvePoint, EtlRun, StressCurve, StressShock
+from src.db.models import EtlRun, ProcessedCurvePoint, RawCurvePoint, StressShock
 
 
 def insert_run(db, **overrides):
@@ -16,31 +16,10 @@ def insert_run(db, **overrides):
         "run_type": "manual",
         "date_from": date(2026, 10, 19),
         "date_to": date(2026, 10, 19),
+        **overrides,
     }
-    values.update(overrides)
     return db.execute(
         EtlRun.__table__.insert().values(**values).returning(EtlRun.id)
-    ).scalar_one()
-
-
-def point_values(run_id, **overrides):
-    values = {
-        "curve_date": date(2026, 10, 19),
-        "quote_time": time(18, 50),
-        "tenor": Decimal(1),
-        "yield_rate": Decimal("0.15"),
-        "discount_factor": Decimal("0.869565217391304348"),
-        "etl_run_id": run_id,
-    }
-    values.update(overrides)
-    return values
-
-
-def insert_point(db, run_id, **overrides):
-    return db.execute(
-        CurvePoint.__table__.insert()
-        .values(**point_values(run_id, **overrides))
-        .returning(CurvePoint.id)
     ).scalar_one()
 
 
@@ -60,228 +39,211 @@ def insert_shock(db, version="test-v1"):
     ).scalar_one()
 
 
-def stress_values(run_id, point_id, shock_id, **overrides):
+def insert_point(db, run_id, **overrides):
     values = {
-        "curve_point_id": point_id,
-        "stress_shock_id": shock_id,
-        "stressed_yield": Decimal("0.19"),
-        "discount_factor": Decimal("0.840336134453781513"),
+        "curve_date": date(2026, 10, 19),
+        "quote_time": time(18, 50),
+        "tenor": Decimal(1),
+        "yield_rate": Decimal("0.15"),
+        "discount_factor": Decimal("0.869565217391304348"),
+        "scenario": "Baseline",
+        "scenario_version": None,
         "etl_run_id": run_id,
+        **overrides,
     }
-    values.update(overrides)
-    return values
+    return db.execute(
+        ProcessedCurvePoint.__table__.insert()
+        .values(**values)
+        .returning(ProcessedCurvePoint.id)
+    ).scalar_one()
 
 
-def test_schema_matches_models_and_migration_round_trip(migrated_db):
+def insert_raw(db, run_id, **overrides):
+    return db.execute(
+        RawCurvePoint.__table__.insert()
+        .values(
+            curve_date=date(2026, 10, 19),
+            quote_time=time(18, 50),
+            **{
+                "tenor": Decimal(1),
+                "yield_rate": Decimal("0.15"),
+                "etl_run_id": run_id,
+                **overrides,
+            },
+        )
+        .returning(RawCurvePoint.id)
+    ).scalar_one()
+
+
+def test_schema_migrates_existing_data_and_round_trips(migrated_db):
     engine, config = migrated_db
     command.check(config)
-    command.downgrade(config, "0001_create_db")
+    command.downgrade(config, "0003_remove_discount_convention")
     with engine.begin() as connection:
         run_id = insert_run(connection)
-        point_id = connection.execute(
-            text(
-                "INSERT INTO curve_points (curve_date, quote_time, tenor, yield_rate, "
-                "discount_factor, discount_convention, etl_run_id) "
-                "VALUES ('2026-10-19', '18:50:00', 1, 0.15, 0.86, 'test-v1', :run_id) "
-                "RETURNING id"
-            ),
-            {"run_id": run_id},
-        ).scalar_one()
-    command.upgrade(config, "head")
-    with engine.connect() as connection:
-        point = (
-            connection.execute(
-                select(CurvePoint.__table__).where(CurvePoint.id == point_id)
-            )
-            .mappings()
-            .one()
-        )
-        assert point["yield_rate"] == Decimal("0.15")
-        assert all(
-            point[name] is False
-            for name in ("is_interpolated", "is_extrapolated", "is_deleted")
-        )
-    command.downgrade(config, "0001_create_db")
-    assert not {"is_interpolated", "is_extrapolated", "is_deleted"} & {
-        column["name"] for column in inspect(engine).get_columns("curve_points")
-    }
-    with engine.connect() as connection:
-        assert (
-            connection.scalar(
-                text("SELECT id FROM curve_points WHERE id = :id"), {"id": point_id}
-            )
-            == point_id
-        )
-    command.upgrade(config, "head")
-    command.check(config)
-    command.downgrade(config, "0002_curve_point_flags")
-    with engine.begin() as connection:
         shock_id = insert_shock(connection)
-        stress_id = connection.execute(
-            text(
-                "INSERT INTO stress_curves (curve_point_id, stress_shock_id, stressed_yield, "
-                "discount_factor, discount_convention, etl_run_id) "
-                "VALUES (:point_id, :shock_id, 0.19, 0.840336134453781513, 'annual_effective_v1', :run_id) "
-                "RETURNING id"
-            ),
-            {"point_id": point_id, "shock_id": shock_id, "run_id": run_id},
-        ).scalar_one()
-    command.upgrade(config, "head")
-    for table in ("curve_points", "stress_curves"):
-        assert "discount_convention" not in {
-            column["name"] for column in inspect(engine).get_columns(table)
-        }
-        assert not any(
-            check["name"].endswith("_convention")
-            for check in inspect(engine).get_check_constraints(table)
-        )
-    with engine.connect() as connection:
-        assert connection.scalar(
-            select(StressCurve.discount_factor).where(StressCurve.id == stress_id)
-        ) == Decimal("0.840336134453781513")
-        assert (
-            connection.scalar(
-                select(StressCurve.curve_point_id).where(StressCurve.id == stress_id)
+        for tenor, interpolated, extrapolated in (
+            (1, False, False),
+            (1.5, True, False),
+            (30, False, True),
+        ):
+            point_id = connection.scalar(
+                text(
+                    "INSERT INTO curve_points (curve_date, quote_time, tenor, yield_rate, discount_factor, "
+                    "etl_run_id, is_interpolated, is_extrapolated) "
+                    "VALUES ('2026-10-19', '18:50', :tenor, 0.15, 0.86, :run, :i, :e) RETURNING id"
+                ),
+                {"tenor": tenor, "run": run_id, "i": interpolated, "e": extrapolated},
             )
-            == point_id
-        )
-    command.downgrade(config, "0002_curve_point_flags")
-    with engine.connect() as connection:
-        for table in ("curve_points", "stress_curves"):
-            assert (
-                connection.scalar(text(f"SELECT discount_convention FROM {table}"))
-                == "annual_effective_v1"
+            connection.execute(
+                text(
+                    "INSERT INTO stress_curves (curve_point_id, stress_shock_id, stressed_yield, "
+                    "discount_factor, etl_run_id) VALUES (:point, :shock, 0.19, 0.84, :run)"
+                ),
+                {"point": point_id, "shock": shock_id, "run": run_id},
             )
-    command.upgrade(config, "head")
-    command.check(config)
-    command.downgrade(config, "base")
-    assert set(inspect(engine).get_table_names()) == {"alembic_version"}
-    command.upgrade(config, "head")
     command.upgrade(config, "head")
     command.check(config)
     assert set(inspect(engine).get_table_names()) == {
         "alembic_version",
         "etl_runs",
-        "curve_points",
         "stress_shocks",
-        "stress_curves",
+        "raw_curve_points",
+        "processed_curve_points",
     }
-
-
-def test_curve_point_flags_default_to_false_and_can_be_updated(db):
-    point_id = insert_point(db, insert_run(db))
-    with Session(bind=db) as session:
-        point = session.get(CurvePoint, point_id)
-        assert point.is_interpolated is False
-        assert point.is_extrapolated is False
-        assert point.is_deleted is False
-        point.is_interpolated = True
-        point.is_extrapolated = True
-        point.is_deleted = True
-        session.flush()
-        session.expire(point)
-        assert point.is_interpolated is True
-        assert point.is_extrapolated is True
-        assert point.is_deleted is True
-
-
-@pytest.mark.parametrize("field", ["is_interpolated", "is_extrapolated", "is_deleted"])
-def test_curve_point_flags_do_not_allow_null(db, field):
-    run_id = insert_run(db)
-    with pytest.raises(IntegrityError), db.begin_nested():
-        insert_point(db, run_id, **{field: None})
-
-
-def test_models_round_trip_and_scenario_versions(db):
-    run_id = insert_run(db)
-    point_id = insert_point(db, run_id)
-    for version in ("test-v1", "test-v2"):
-        shock_id = insert_shock(db, version)
-        db.execute(
-            StressCurve.__table__.insert().values(
-                **stress_values(run_id, point_id, shock_id)
-            )
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(RawCurvePoint)) == 1
+        assert (
+            connection.scalar(select(func.count()).select_from(ProcessedCurvePoint))
+            == 6
         )
-    with Session(bind=db) as session:
-        point = session.get(CurvePoint, point_id)
-        assert point.yield_rate == Decimal("0.15")
-        assert point.discount_factor == Decimal("0.869565217391304348")
-        assert point.created_at.utcoffset() is not None
-        assert session.scalar(select(func.count()).select_from(StressCurve)) == 2
+        assert connection.scalar(select(RawCurvePoint.yield_rate)) == Decimal("0.15")
+        stress = (
+            connection.execute(
+                select(ProcessedCurvePoint.__table__).where(
+                    ProcessedCurvePoint.scenario == "Parallel_Up",
+                    ProcessedCurvePoint.tenor == 30,
+                )
+            )
+            .mappings()
+            .one()
+        )
+        assert stress["is_extrapolated"]
+        assert stress["scenario_version"] == "test-v1"
+        assert stress["yield_rate"] == Decimal("0.19")
+        assert stress["discount_factor"] == Decimal("0.84")
+        assert stress["etl_run_id"] == run_id
+        assert stress["created_at"].utcoffset() is not None
+    # Refuse a downgrade that would silently discard raw-only failed snapshots.
+    with engine.begin() as connection:
+        extra = insert_raw(connection, run_id, tenor=2)
+    with pytest.raises(
+        DBAPIError, match="raw observations without a matching baseline"
+    ):
+        command.downgrade(config, "0003_remove_discount_convention")
+    assert "raw_curve_points" in inspect(engine).get_table_names()
+    with engine.begin() as connection:
+        connection.execute(
+            RawCurvePoint.__table__.delete().where(RawCurvePoint.id == extra)
+        )
+    command.downgrade(config, "0003_remove_discount_convention")
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM curve_points")) == 3
+        assert connection.scalar(text("SELECT count(*) FROM stress_curves")) == 3
+    command.upgrade(config, "head")
+    command.check(config)
+    command.downgrade(config, "base")
+    assert set(inspect(engine).get_table_names()) == {"alembic_version"}
+    command.upgrade(config, "head")
+    command.check(config)
 
 
-def test_duplicate_point_rejected_but_another_quote_time_allowed(db):
+def test_raw_points_preserve_precision_and_have_no_synthetic_fields(db):
     run_id = insert_run(db)
-    insert_point(db, run_id)
-    insert_point(db, run_id, quote_time=time(19, 0))
+    value = Decimal("0.12345678901234567890123456789012345678")
+    point_id = insert_raw(db, run_id, yield_rate=value)
+    assert (
+        db.scalar(select(RawCurvePoint.yield_rate).where(RawCurvePoint.id == point_id))
+        == value
+    )
+    assert "discount_factor" not in RawCurvePoint.__table__.c
+    assert "is_interpolated" not in RawCurvePoint.__table__.c
     with pytest.raises(IntegrityError), db.begin_nested():
-        insert_point(db, run_id)
-
-
-def test_stress_duplicate_and_foreign_keys(db):
-    run_id = insert_run(db)
-    point_id = insert_point(db, run_id)
-    shock_id = insert_shock(db)
-    values = stress_values(run_id, point_id, shock_id)
-    db.execute(StressCurve.__table__.insert().values(**values))
-    for invalid in (
-        values,
-        {**values, "curve_point_id": -1},
-        {**values, "stress_shock_id": -1},
-        {
-            **values,
-            "etl_run_id": uuid4(),
-            "stress_shock_id": insert_shock(db, "test-v2"),
-        },
-    ):
-        with pytest.raises(IntegrityError), db.begin_nested():
-            db.execute(StressCurve.__table__.insert().values(**invalid))
-    for table, key in (
-        (EtlRun.__table__, run_id),
-        (CurvePoint.__table__, point_id),
-        (StressShock.__table__, shock_id),
-    ):
-        with pytest.raises(IntegrityError), db.begin_nested():
-            db.execute(table.delete().where(table.c.id == key))
+        insert_raw(db, run_id)
 
 
 @pytest.mark.parametrize(
     "changes",
     [
+        {"yield_rate": None},
+        {"yield_rate": Decimal("NaN")},
+        {"yield_rate": Decimal("Infinity")},
         {"tenor": 0},
-        {"tenor": -1},
+        {"etl_run_id": uuid4()},
+    ],
+)
+def test_invalid_raw_points_rejected(db, changes):
+    with pytest.raises(IntegrityError), db.begin_nested():
+        insert_raw(db, insert_run(db), **changes)
+
+
+def test_baseline_and_two_versions_share_coordinates_without_duplicates(db):
+    run_id = insert_run(db)
+    insert_point(db, run_id)
+    for version in ("test-v1", "test-v2"):
+        insert_shock(db, version)
+        insert_point(db, run_id, scenario="Parallel_Up", scenario_version=version)
+    assert db.scalar(select(func.count()).select_from(ProcessedCurvePoint)) == 3
+    with pytest.raises(IntegrityError), db.begin_nested():
+        insert_point(db, run_id)  # NULL version must not allow duplicate baselines.
+    with pytest.raises(IntegrityError), db.begin_nested():
+        insert_point(db, run_id, scenario="Parallel_Up", scenario_version="test-v1")
+    insert_point(db, run_id, quote_time=time(19))
+    with pytest.raises(IntegrityError), db.begin_nested():
+        db.execute(StressShock.__table__.delete())
+    with pytest.raises(IntegrityError), db.begin_nested():
+        db.execute(EtlRun.__table__.delete())
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"scenario": "unknown"},
+        {"scenario_version": "v1"},
+        {"scenario": "Parallel_Up"},
+        {"scenario": "Parallel_Up", "scenario_version": "missing"},
+        {"scenario": "Short_Up", "scenario_version": "test-v1"},
+        {"tenor": 0},
         {"tenor": Decimal("NaN")},
         {"yield_rate": Decimal("NaN")},
         {"discount_factor": 0},
-        {"discount_factor": -1},
         {"discount_factor": Decimal("NaN")},
         {"etl_run_id": uuid4()},
     ],
 )
-def test_invalid_base_points_rejected(db, changes):
+def test_invalid_processed_points_rejected(db, changes):
     run_id = insert_run(db)
+    insert_shock(db)
     with pytest.raises(IntegrityError), db.begin_nested():
         insert_point(db, run_id, **changes)
 
 
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"stressed_yield": Decimal("NaN")},
-        {"discount_factor": 0},
-        {"discount_factor": Decimal("NaN")},
-    ],
-)
-def test_invalid_stress_points_rejected(db, changes):
+@pytest.mark.parametrize("field", ["is_interpolated", "is_extrapolated", "is_deleted"])
+def test_flags_default_false_and_reject_null(db, field):
     run_id = insert_run(db)
-    values = stress_values(
-        run_id, insert_point(db, run_id), insert_shock(db), **changes
-    )
+    point_id = insert_point(db, run_id)
+    with Session(bind=db) as session:
+        point = session.get(ProcessedCurvePoint, point_id)
+        assert getattr(point, field) is False
+        setattr(point, field, True)
+        session.flush()
+        session.expire(point)
+        assert getattr(point, field) is True
     with pytest.raises(IntegrityError), db.begin_nested():
-        db.execute(StressCurve.__table__.insert().values(**values))
+        insert_point(db, run_id, tenor=2, **{field: None})
 
 
-def test_negative_rate_and_discount_above_one_allowed(db):
+def test_negative_rates_and_discount_above_one_allowed(db):
     insert_point(
         db, insert_run(db), yield_rate=Decimal("-0.01"), discount_factor=Decimal("1.01")
     )
@@ -349,12 +311,3 @@ def test_scenario_parameters_are_versioned_and_immutable(db):
     ):
         with pytest.raises(IntegrityError), db.begin_nested():
             db.execute(StressShock.__table__.insert().values(**values))
-
-
-def test_failed_transaction_leaves_no_partial_points(db):
-    run_id = insert_run(db)
-    with pytest.raises(IntegrityError), db.begin_nested():
-        insert_point(db, run_id)
-        insert_point(db, run_id, tenor=0)
-    assert db.scalar(select(func.count()).select_from(CurvePoint)) == 0
-    assert db.scalar(select(func.count()).select_from(EtlRun)) == 1

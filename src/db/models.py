@@ -16,6 +16,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Identity,
     Index,
     Integer,
@@ -92,34 +93,106 @@ class EtlRun(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
 
-class CurvePoint(Base):
-    __tablename__ = "curve_points"
+class RawCurvePoint(Base):
+    """One original, observed MOEX rate; no interpolated or missing values."""
+
+    __tablename__ = "raw_curve_points"
     __table_args__ = (
         UniqueConstraint(
-            "curve_date", "quote_time", "tenor", name="uq_curve_points_snapshot_tenor"
+            "curve_date",
+            "quote_time",
+            "tenor",
+            name="uq_raw_curve_points_snapshot_tenor",
         ),
         CheckConstraint(
-            "tenor > 0 AND tenor < 'Infinity'::numeric", name="ck_curve_points_tenor"
+            "tenor > 0 AND tenor < 'Infinity'::numeric",
+            name="ck_raw_curve_points_tenor",
         ),
         CheckConstraint(
             "yield_rate > '-Infinity'::numeric AND yield_rate < 'Infinity'::numeric",
-            name="ck_curve_points_yield",
+            name="ck_raw_curve_points_yield",
         ),
-        CheckConstraint(
-            "discount_factor > 0 AND discount_factor < 'Infinity'::numeric",
-            name="ck_curve_points_discount",
-        ),
-        Index("ix_curve_points_etl_run_id", "etl_run_id"),
+        Index("ix_raw_curve_points_etl_run_id", "etl_run_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     curve_date: Mapped[date] = mapped_column(Date)
     quote_time: Mapped[time] = mapped_column(Time(timezone=False))
     tenor: Mapped[Decimal] = mapped_column(Numeric(12, 6))
+    yield_rate: Mapped[Decimal] = mapped_column(Numeric())
+    etl_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey(
+            "etl_runs.id", name="fk_raw_curve_points_etl_run", ondelete="RESTRICT"
+        )
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ProcessedCurvePoint(Base):
+    """A baseline or stress point, with its own date/time/tenor and rate."""
+
+    __tablename__ = "processed_curve_points"
+    __table_args__ = (
+        UniqueConstraint(
+            "curve_date",
+            "quote_time",
+            "tenor",
+            "scenario",
+            "scenario_version",
+            name="uq_processed_curve_points_key",
+            postgresql_nulls_not_distinct=True,
+        ),
+        ForeignKeyConstraint(
+            ["scenario", "scenario_version"],
+            ["stress_shocks.scenario", "stress_shocks.version"],
+            name="fk_processed_curve_points_scenario",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "scenario IN ('Baseline', 'Parallel_Up', 'Parallel_Down', 'Short_Up', 'Short_Down', 'Steepener', 'Flattener')",
+            name="ck_processed_curve_points_scenario",
+        ),
+        CheckConstraint(
+            "(scenario = 'Baseline' AND scenario_version IS NULL) OR (scenario <> 'Baseline' AND scenario_version IS NOT NULL)",
+            name="ck_processed_curve_points_version",
+        ),
+        CheckConstraint(
+            "tenor > 0 AND tenor < 'Infinity'::numeric",
+            name="ck_processed_curve_points_tenor",
+        ),
+        CheckConstraint(
+            "yield_rate > '-Infinity'::numeric AND yield_rate < 'Infinity'::numeric",
+            name="ck_processed_curve_points_yield",
+        ),
+        CheckConstraint(
+            "discount_factor > 0 AND discount_factor < 'Infinity'::numeric",
+            name="ck_processed_curve_points_discount",
+        ),
+        Index("ix_processed_curve_points_etl_run_id", "etl_run_id"),
+        Index(
+            "ix_processed_curve_points_scenario",
+            "scenario",
+            "scenario_version",
+            "curve_date",
+            "quote_time",
+            "tenor",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    curve_date: Mapped[date] = mapped_column(Date)
+    quote_time: Mapped[time] = mapped_column(Time(timezone=False))
+    tenor: Mapped[Decimal] = mapped_column(Numeric(12, 6))
+    scenario: Mapped[str] = mapped_column(String(32))
+    scenario_version: Mapped[str | None] = mapped_column(String(64))
     yield_rate: Mapped[Decimal] = mapped_column(Numeric(18, 10))
     discount_factor: Mapped[Decimal] = mapped_column(Numeric(28, 18))
     etl_run_id: Mapped[UUID] = mapped_column(
-        ForeignKey("etl_runs.id", name="fk_curve_points_etl_run", ondelete="RESTRICT")
+        ForeignKey(
+            "etl_runs.id", name="fk_processed_curve_points_etl_run", ondelete="RESTRICT"
+        )
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -159,45 +232,6 @@ class StressShock(Base):
     scenario: Mapped[str] = mapped_column(String(32))
     version: Mapped[str] = mapped_column(String(64))
     parameters: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-
-class StressCurve(Base):
-    __tablename__ = "stress_curves"
-    __table_args__ = (
-        UniqueConstraint(
-            "curve_point_id", "stress_shock_id", name="uq_stress_curves_point_shock"
-        ),
-        CheckConstraint(
-            "stressed_yield > '-Infinity'::numeric AND stressed_yield < 'Infinity'::numeric",
-            name="ck_stress_curves_yield",
-        ),
-        CheckConstraint(
-            "discount_factor > 0 AND discount_factor < 'Infinity'::numeric",
-            name="ck_stress_curves_discount",
-        ),
-        Index("ix_stress_curves_shock_point", "stress_shock_id", "curve_point_id"),
-        Index("ix_stress_curves_etl_run_id", "etl_run_id"),
-    )
-
-    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    curve_point_id: Mapped[int] = mapped_column(
-        ForeignKey(
-            "curve_points.id", name="fk_stress_curves_point", ondelete="RESTRICT"
-        )
-    )
-    stress_shock_id: Mapped[int] = mapped_column(
-        ForeignKey(
-            "stress_shocks.id", name="fk_stress_curves_shock", ondelete="RESTRICT"
-        )
-    )
-    stressed_yield: Mapped[Decimal] = mapped_column(Numeric(18, 10))
-    discount_factor: Mapped[Decimal] = mapped_column(Numeric(28, 18))
-    etl_run_id: Mapped[UUID] = mapped_column(
-        ForeignKey("etl_runs.id", name="fk_stress_curves_etl_run", ondelete="RESTRICT")
-    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
