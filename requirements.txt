@@ -2,4 +2,8 @@
 click>=8.1.7
 selenium>=4.30.0
 openpyxl>=3.1.5,<4
+fastapi>=0.115,<1
+pydantic>=2.9,<3
+uvicorn>=0.30,<1
+tzdata>=2025.2
 -r requirements-db.txt
