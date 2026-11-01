@@ -1,9 +1,8 @@
-"""Collect, calculate and publish curves; each date has its own transaction."""
+"""Persist original observations, then atomically publish seven curves per date."""
 
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from decimal import ROUND_HALF_UP, Decimal, localcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import UUID, uuid4
@@ -12,10 +11,9 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
-from src.db.models import CurvePoint, EtlRun, StressCurve, StressShock
+from src.db.models import EtlRun, ProcessedCurvePoint, RawCurvePoint, StressShock
 from src.db.session import get_session_factory
 from src.etl.calculations import (
-    PRECISION,
     RawSnapshot,
     ScenarioParameters,
     calculate_snapshot,
@@ -23,7 +21,6 @@ from src.etl.calculations import (
 from src.etl.common import (
     DEFAULT_DOWNLOADS_DIR,
     OUTPUT_NAME,
-    SOURCE_TERMS,
     DataValidationError,
     DateRange,
     NoDataError,
@@ -55,21 +52,44 @@ def _message(exc: Exception) -> str:
     return f"{type(exc).__name__}: {str(original).strip() or type(original).__name__}"
 
 
-def _stored(value: Decimal, scale: int) -> Decimal:
-    """Compare with PostgreSQL NUMERIC rounding, not unrounded calculation output."""
-    with localcontext() as context:
-        context.prec = PRECISION
-        return value.quantize(Decimal(1).scaleb(-scale), rounding=ROUND_HALF_UP)
-
-
-def _base_changed(existing: CurvePoint, record: dict) -> bool:
-    return any(
-        getattr(existing, name) != _stored(record[name], scale)
-        for name, scale in (("yield_rate", 10), ("discount_factor", 18))
-    ) or any(
-        getattr(existing, name) != record[name]
-        for name in ("is_interpolated", "is_extrapolated", "is_deleted")
+def _save_raw_snapshot(session: Session, raw: RawSnapshot, run_id: UUID) -> int:
+    condition = (
+        RawCurvePoint.curve_date == raw.curve_date,
+        RawCurvePoint.quote_time == raw.quote_time,
     )
+    previous = dict(
+        session.execute(
+            select(RawCurvePoint.tenor, RawCurvePoint.yield_rate).where(*condition)
+        ).all()
+    )
+    records = raw.records(run_id)
+    observed = {record["tenor"]: record["yield_rate"] for record in records}
+    if previous != observed:
+        # Source corrections/removals invalidate all seven curves and all parameter
+        # versions. This stays committed with raw data even if recalculation fails.
+        session.execute(
+            delete(ProcessedCurvePoint).where(
+                ProcessedCurvePoint.curve_date == raw.curve_date,
+                ProcessedCurvePoint.quote_time == raw.quote_time,
+            )
+        )
+    session.execute(
+        delete(RawCurvePoint).where(
+            *condition, RawCurvePoint.tenor.not_in(list(observed))
+        )
+    )
+    if records:
+        statement = insert(RawCurvePoint).values(records)
+        session.execute(
+            statement.on_conflict_do_update(
+                constraint="uq_raw_curve_points_snapshot_tenor",
+                set_={
+                    name: getattr(statement.excluded, name)
+                    for name in ("yield_rate", "etl_run_id")
+                },
+            )
+        )
+    return len(records)
 
 
 def _publish_date(
@@ -77,90 +97,86 @@ def _publish_date(
     snapshots: list[RawSnapshot],
     parameters: ScenarioParameters,
     run_id: UUID,
-) -> tuple[int, int, int]:
-    """Caller owns the transaction. No commits here, including scenario definitions."""
-    curve_date = snapshots[0].curve_date
-    # A stable two-int advisory key serializes concurrent writers for the same date.
-    # Different dates can still load concurrently; PostgreSQL releases it on rollback.
+) -> tuple[int, int, int, str | None]:
+    """Persist raw observations; isolate the complete calculated date in a savepoint."""
     session.execute(
         text("SELECT pg_advisory_xact_lock(:namespace, :day)"),
-        {"namespace": 205, "day": curve_date.toordinal()},
+        {"namespace": 205, "day": snapshots[0].curve_date.toordinal()},
     )
-    interpolated = extrapolated = saved = 0
-    for raw in snapshots:
-        calculated = calculate_snapshot(raw, parameters)
-        records = [point.record(run_id) for point in calculated.base_points]
-        old = {
-            point.tenor: point
-            for point in session.scalars(
-                select(CurvePoint).where(
-                    CurvePoint.curve_date == raw.curve_date,
-                    CurvePoint.quote_time == raw.quote_time,
+    raw_saved = sum(_save_raw_snapshot(session, raw, run_id) for raw in snapshots)
+    saved = interpolated = extrapolated = 0
+    try:
+        with session.begin_nested():
+            for source in snapshots:
+                # Calculations read the observations just persisted in PostgreSQL,
+                # not restored values or the previous processed baseline.
+                rates = dict(
+                    session.execute(
+                        select(RawCurvePoint.tenor, RawCurvePoint.yield_rate).where(
+                            RawCurvePoint.curve_date == source.curve_date,
+                            RawCurvePoint.quote_time == source.quote_time,
+                        )
+                    ).all()
                 )
-            )
-        }
-        if any(
-            record["tenor"] in old and _base_changed(old[record["tenor"]], record)
-            for record in records
-        ):
-            # All old scenario versions refer to this mutable baseline. Invalidate
-            # the entire snapshot's old results before publishing the current six.
-            session.execute(
-                delete(StressCurve).where(
-                    StressCurve.curve_point_id.in_([point.id for point in old.values()])
+                raw = RawSnapshot(source.curve_date, source.quote_time, rates)
+                calculated = calculate_snapshot(raw, parameters)
+                base = {point.tenor: point for point in calculated.base_points}
+                records = [point.record(run_id) for point in calculated.base_points]
+                for curve in calculated.scenarios:
+                    definition = curve.definition_record()
+                    session.execute(
+                        insert(StressShock)
+                        .values(**definition)
+                        .on_conflict_do_nothing(
+                            constraint="uq_stress_shocks_scenario_version"
+                        )
+                    )
+                    shock = session.scalar(
+                        select(StressShock).where(
+                            StressShock.scenario == definition["scenario"],
+                            StressShock.version == definition["version"],
+                        )
+                    )
+                    if shock.parameters != definition["parameters"]:
+                        raise DataValidationError(
+                            "Версия сценария уже имеет другие параметры"
+                        )
+                    records.extend(
+                        point.record(
+                            base[point.tenor],
+                            curve.scenario,
+                            curve.parameters.version,
+                            run_id,
+                        )
+                        for point in curve.points
+                    )
+                statement = insert(ProcessedCurvePoint).values(records)
+                session.execute(
+                    statement.on_conflict_do_update(
+                        constraint="uq_processed_curve_points_key",
+                        set_={
+                            name: getattr(statement.excluded, name)
+                            for name in (
+                                "yield_rate",
+                                "discount_factor",
+                                "etl_run_id",
+                                "is_interpolated",
+                                "is_extrapolated",
+                                "is_deleted",
+                            )
+                        },
+                    )
                 )
-            )
-        statement = insert(CurvePoint).values(records)
-        statement = statement.on_conflict_do_update(
-            constraint="uq_curve_points_snapshot_tenor",
-            set_={
-                name: getattr(statement.excluded, name)
-                for name in (
-                    "yield_rate",
-                    "discount_factor",
-                    "etl_run_id",
-                    "is_interpolated",
-                    "is_extrapolated",
-                    "is_deleted",
+                saved += len(records)
+                interpolated += sum(
+                    point.is_interpolated for point in calculated.base_points
                 )
-            },
-        ).returning(CurvePoint.tenor, CurvePoint.id)
-        ids = dict(session.execute(statement).all())
-        saved += len(records)
-        interpolated += sum(point.is_interpolated for point in calculated.base_points)
-        extrapolated += sum(point.is_extrapolated for point in calculated.base_points)
-        for curve in calculated.scenarios:
-            definition = curve.definition_record()
-            # Definitions are immutable; even a no-op UPDATE would fire the trigger.
-            session.execute(
-                insert(StressShock)
-                .values(**definition)
-                .on_conflict_do_nothing(constraint="uq_stress_shocks_scenario_version")
-            )
-            shock = session.scalar(
-                select(StressShock).where(
-                    StressShock.scenario == definition["scenario"],
-                    StressShock.version == definition["version"],
+                extrapolated += sum(
+                    point.is_extrapolated for point in calculated.base_points
                 )
-            )
-            if shock.parameters != definition["parameters"]:
-                raise DataValidationError("Версия сценария уже имеет другие параметры")
-            stress_records = [
-                point.record(ids[point.tenor], shock.id, run_id)
-                for point in curve.points
-            ]
-            statement = insert(StressCurve).values(stress_records)
-            session.execute(
-                statement.on_conflict_do_update(
-                    constraint="uq_stress_curves_point_shock",
-                    set_={
-                        name: getattr(statement.excluded, name)
-                        for name in ("stressed_yield", "discount_factor", "etl_run_id")
-                    },
-                )
-            )
-            saved += len(stress_records)
-    return saved, interpolated, extrapolated
+    except Exception as exc:  # noqa: BLE001 - retain raw observations on calculation/DB failure
+        return raw_saved, 0, 0, _message(exc)
+    return raw_saved + saved, interpolated, extrapolated, None
 
 
 def run_pipeline(
@@ -177,7 +193,7 @@ def run_pipeline(
 
     A fresh session/transaction records start and finish independently of curves.
     Reuse requires the exact manifest range. CSV remains raw with NA markers.
-    rows_saved counts upserted base + stress rows, including repeat writes.
+    rows_saved counts upserted raw + processed rows, including repeat writes.
     """
     if run_type not in {"manual", "scheduled"}:
         raise ValueError("run_type должен быть manual или scheduled")
@@ -224,17 +240,24 @@ def run_pipeline(
                 raise DataValidationError("Снимок вне запрошенного диапазона")
             grouped[snapshot.curve_date].append(snapshot)
         result.missing_dates = [day for day in dates.days() if day not in grouped]
-        result.rows_processed = len(snapshots) * len(SOURCE_TERMS)
+        result.rows_processed = sum(
+            rate is not None
+            for snapshot in snapshots
+            for rate in snapshot.rates.values()
+        )
         for day, day_snapshots in sorted(grouped.items()):
             try:
                 with factory.begin() as session:
-                    saved, interpolated, extrapolated = _publish_date(
+                    saved, interpolated, extrapolated, error = _publish_date(
                         session, day_snapshots, parameters, result.run_id
                     )
-                # Only count committed dates, never work rolled back on failure.
+                result.rows_saved += saved
+                if error is not None:
+                    result.errors[day.isoformat()] = error
+                    continue
+                # Only count complete, committed sets of seven calculated curves.
                 result.saved_dates.append(day)
                 result.snapshot_count += len(day_snapshots)
-                result.rows_saved += saved
                 result.interpolated += interpolated
                 result.extrapolated += extrapolated
             except Exception as exc:  # noqa: BLE001 - isolate dates and persist failures
@@ -271,7 +294,9 @@ def run_pipeline(
             .where(EtlRun.id == result.run_id)
             .values(
                 status=result.status,
-                finished_at=func.clock_timestamp(),
+                # Wall clocks can move backwards, e.g. after VM time sync.
+                # Keep the run journal valid even when the observed duration is zero.
+                finished_at=func.greatest(EtlRun.started_at, func.clock_timestamp()),
                 rows_processed=result.rows_processed,
                 rows_saved=result.rows_saved,
                 reason="; ".join(reason_parts) or None,
