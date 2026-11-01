@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 from click.testing import CliRunner
-from sqlalchemy import event, func, select, text
+from sqlalchemy import event, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -337,6 +337,36 @@ def test_source_error_is_audited_and_cli_can_replay(factory, tmp_path, monkeypat
             count(session, RawCurvePoint) == 12
             and count(session, ProcessedCurvePoint) == 133
         )
+
+
+@pytest.mark.parametrize("outcome", ["success", "failed"])
+def test_run_finishes_if_database_clock_moves_backwards(
+    factory, tmp_path, monkeypatch, outcome
+):
+    folder = source(tmp_path, [(DAY, "18:00:00", complete())])
+
+    def collect(dates, run_dir, timeout):
+        # Simulate an earlier wall clock at completion without changing the real
+        # server clock: the already committed start now lies in the future.
+        with factory.begin() as session:
+            session.execute(
+                update(EtlRun)
+                .where(EtlRun.status == "running")
+                .values(started_at=func.clock_timestamp() + text("interval '1 hour'"))
+            )
+        if outcome == "failed":
+            raise TimeoutError("source unavailable after clock adjustment")
+        return merge_run(folder)
+
+    monkeypatch.setattr(pipeline, "collect_curves", collect)
+    result = pipeline.run_pipeline(DATES, session_factory=factory)
+    assert result.status == outcome
+    with factory() as session:
+        run = session.get(EtlRun, result.run_id)
+        assert run.status == outcome
+        assert run.finished_at == run.started_at
+        if outcome == "failed":
+            assert "source unavailable" in run.error
 
 
 def test_no_data_and_missing_dates_are_not_fabricated(factory, tmp_path):

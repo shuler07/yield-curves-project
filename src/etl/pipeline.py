@@ -294,7 +294,9 @@ def run_pipeline(
             .where(EtlRun.id == result.run_id)
             .values(
                 status=result.status,
-                finished_at=func.clock_timestamp(),
+                # Wall clocks can move backwards, e.g. after VM time sync.
+                # Keep the run journal valid even when the observed duration is zero.
+                finished_at=func.greatest(EtlRun.started_at, func.clock_timestamp()),
                 rows_processed=result.rows_processed,
                 rows_saved=result.rows_saved,
                 reason="; ".join(reason_parts) or None,
