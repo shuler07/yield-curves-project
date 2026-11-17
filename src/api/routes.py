@@ -1,11 +1,14 @@
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import date as Date
+from functools import partial
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from src.api.loading import get_history_loader
 from src.api.schemas import (
     CurveResponse,
     ProcessedHistoryResponse,
@@ -44,10 +47,19 @@ def requested_dates(
 
 Dates = Annotated[DateRange, Depends(requested_dates)]
 Database = Annotated[Session, Depends(get_db)]
+Loader = Annotated[Callable, Depends(get_history_loader)]
 
 
 @router.get("/raw", response_model=RawHistoryResponse, summary="Исходные ставки MOEX")
-def raw_curves(dates: Dates, session: Database):
+def raw_curves(dates: Dates, session: Database, request: Request, loader: Loader):
+    return loader(
+        partial(read_raw_curves, dates, session),
+        session,
+        timeout=request.app.state.settings.timeout_seconds,
+    )
+
+
+def read_raw_curves(dates: DateRange, session: Session):
     rows = session.scalars(
         select(RawCurvePoint)
         .where(RawCurvePoint.curve_date.between(dates.start, dates.end))
@@ -79,7 +91,20 @@ def raw_curves(dates: Dates, session: Database):
 def processed_curves(
     dates: Dates,
     session: Database,
+    request: Request,
+    loader: Loader,
     scenario_version: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+):
+    return loader(
+        partial(read_processed_curves, dates, session, scenario_version),
+        session,
+        timeout=request.app.state.settings.timeout_seconds,
+        version=scenario_version,
+    )
+
+
+def read_processed_curves(
+    dates: DateRange, session: Session, scenario_version: str | None = None
 ):
     statement = (
         select(ProcessedCurvePoint, EtlRun.started_at)

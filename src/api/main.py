@@ -28,6 +28,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await asyncio.to_thread(scheduler.stop)
 
     app = FastAPI(title="Yield Curves API", version="1.0.0", lifespan=lifespan)
+    app.state.settings = settings
     app.include_router(router)
 
     @app.exception_handler(SQLAlchemyError)

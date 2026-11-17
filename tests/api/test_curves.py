@@ -7,6 +7,7 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from src.api.loading import get_history_loader
 from src.api.main import create_app
 from src.api.settings import Settings
 from src.db.models import EtlRun, ProcessedCurvePoint, RawCurvePoint
@@ -33,6 +34,11 @@ def seed(session, day=DAY, quote_time=time(18), parameters=None, rates=None):
 @pytest.fixture
 def client(db):
     app = create_app(Settings(scheduler_enabled=False))
+    # These tests cover reading/serialization. Loading is exercised end-to-end
+    # separately using committed sessions and a mocked MOEX collector.
+    app.dependency_overrides[get_history_loader] = lambda: (
+        lambda read, session, **kwargs: read()
+    )
     with Session(bind=db) as session:
 
         def dependency():
