@@ -1,0 +1,215 @@
+/* Dashboard компонент */
+.dashboard {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+/* Заголовок дашборда */
+.dashboard-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 1rem;
+}
+
+.dashboard-title {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.dashboard-title-icon {
+    width: 1.75rem;
+    height: 1.75rem;
+    color: #60a5fa;
+}
+
+.dashboard-subtitle {
+    color: #9ca3af;
+    margin-top: 0.25rem;
+}
+
+.dashboard-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.chart-type-btn {
+    padding: 0.5rem;
+    border-radius: 0.5rem;
+    border: 1px solid #4b5563;
+    background: transparent;
+    color: #9ca3af;
+    transition: all 0.2s;
+}
+
+.chart-type-btn:hover {
+    color: #ffffff;
+}
+
+.chart-type-btn.active {
+    background-color: rgba(59, 130, 246, 0.2);
+    border-color: rgba(59, 130, 246, 0.3);
+    color: #93c5fd;
+}
+
+.chart-type-btn-icon {
+    width: 1.25rem;
+    height: 1.25rem;
+}
+
+/* Сетка элементов управления */
+.controls-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+}
+
+/* Карточка графика */
+.chart-card {
+    background-color: rgba(31, 41, 55, 0.5);
+    border: 1px solid #374151;
+    border-radius: 0.75rem;
+    padding: 1.5rem;
+    width: 100%;
+}
+
+.chart-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+}
+
+.chart-card-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #d1d5db;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.chart-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+}
+
+.chart-checkbox-input {
+    width: 0.875rem;
+    height: 0.875rem;
+    border-radius: 0.25rem;
+    border: 1px solid #4b5563;
+    background-color: #374151;
+    accent-color: #3b82f6;
+}
+
+.chart-checkbox-label {
+    font-size: 0.75rem;
+    color: #d1d5db;
+}
+
+.chart-container {
+    width: 100%;
+    height: 500px;
+}
+
+.chart-info {
+    margin-top: 0.75rem;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    background-color: rgba(59, 130, 246, 0.05);
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    border-radius: 0.5rem;
+}
+
+.chart-info-icon {
+    width: 1rem;
+    height: 1rem;
+    color: #60a5fa;
+    flex-shrink: 0;
+    margin-top: 0.125rem;
+}
+
+.chart-info-text {
+    font-size: 0.75rem;
+    color: rgba(147, 197, 253, 0.8);
+}
+
+
+
+/* Таблица бакетов */
+.bucket-table-card {
+    background-color: rgba(31, 41, 55, 0.5);
+    border: 1px solid #374151;
+    border-radius: 0.75rem;
+    padding: 1rem;
+    overflow-x: auto;
+}
+
+.bucket-table-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #d1d5db;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.75rem;
+}
+
+.bucket-table {
+    width: 100%;
+    font-size: 0.75rem;
+    border-collapse: collapse;
+}
+
+.bucket-table th {
+    text-align: left;
+    padding: 0.5rem 0.5rem;
+    color: #9ca3af;
+    font-weight: 500;
+    border-bottom: 1px solid #374151;
+}
+
+.bucket-table th.right {
+    text-align: right;
+}
+
+.bucket-table td {
+    padding: 0.375rem 0.5rem;
+    border-bottom: 1px solid rgba(55, 65, 81, 0.5);
+}
+
+.bucket-table td.right {
+    text-align: right;
+}
+
+.bucket-table td.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.bucket-table td.white {
+    color: #ffffff;
+}
+
+.bucket-table td.gray {
+    color: #9ca3af;
+}
+
+.bucket-table tr:hover {
+    background-color: rgba(55, 65, 81, 0.2);
+}
+
+@media (min-width: 768px) {
+    .controls-grid {
+        grid-template-columns: 300px 1fr;
+    }
+}
