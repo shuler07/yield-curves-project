@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Yield Curves API — справочник</title>
+  <style>
+    body {
+      margin: 0;
+      color: #182332;
+      background: #f5f7fa;
+      font: 1rem/1.6 system-ui, sans-serif;
+    }
+    main {
+      box-sizing: border-box;
+      max-width: 66rem;
+      margin: 0 auto;
+      padding: clamp(1rem, 4vw, 3rem);
+      background: #fff;
+    }
+    h1, h2, h3 { line-height: 1.25; }
+    h1 { margin-top: 0; }
+    section { margin-top: 2.5rem; }
+    a { color: #194d92; }
+    nav ul {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.25rem;
+      padding: 0;
+      list-style: none;
+    }
+    nav, th, pre { background: #eef3f8; }
+    nav { padding: 0.125rem 1rem; border-radius: 0.5rem; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td {
+      padding: 0.55rem 0.75rem;
+      border-bottom: 1px solid #d5dfe9;
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    code { font-size: 0.9em; }
+    pre { padding: 1rem; border-radius: 0.5rem; overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Yield Curves API</h1>
+    <p>API отдаёт историю кривых бескупонной доходности Мосбиржи. При локальном
+      запуске адрес сервера — <code>http://127.0.0.1:8000</code>.</p>
+    <p><a href="http://127.0.0.1:8000/docs">Swagger UI</a> ·
+      <a href="http://127.0.0.1:8000/openapi.json">OpenAPI JSON</a></p>
+  </header>
+
+  <nav aria-label="Разделы справочника">
+    <ul>
+      <li><a href="#request">Формат запроса</a></li>
+      <li><a href="#response">Формат ответа</a></li>
+      <li><a href="#raw">Исходные кривые</a></li>
+      <li><a href="#processed">Обработанные кривые</a></li>
+      <li><a href="#errors">Загрузка и ошибки</a></li>
+    </ul>
+  </nav>
+
+  <section id="request">
+    <h2>Формат запроса</h2>
+    <p>Оба эндпоинта используют <code>GET</code> с параметрами в строке запроса.
+      Тело запроса отсутствует.</p>
+    <table>
+      <thead>
+        <tr><th scope="col">Параметр</th><th scope="col">Формат</th><th scope="col">Назначение</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row"><code>date</code></th><td><code>YYYY-MM-DD</code></td><td>Одна дата.</td></tr>
+        <tr><th scope="row"><code>date_from</code></th><td><code>YYYY-MM-DD</code></td><td>Начало диапазона включительно.</td></tr>
+        <tr><th scope="row"><code>date_to</code></th><td><code>YYYY-MM-DD</code></td><td>Конец диапазона включительно.</td></tr>
+        <tr><th scope="row"><code>scenario_version</code></th><td>Строка, 1–64 символа</td><td>Необязательный идентификатор версии стресс-сценариев. Применяется к <code>/curves/processed</code>.</td></tr>
+      </tbody>
+    </table>
+    <p>Передайте <code>date</code> отдельно или пару <code>date_from</code> и
+      <code>date_to</code>. Начало диапазона должно быть не позже конца.</p>
+    <pre><code>curl 'http://127.0.0.1:8000/curves/raw?date=2026-10-30'
+curl 'http://127.0.0.1:8000/curves/processed?date_from=2026-10-26&amp;date_to=2026-10-30'
+curl 'http://127.0.0.1:8000/curves/processed?date=2026-10-30&amp;scenario_version=irrbb_v1_a6a304e2d32aba4c'</code></pre>
+  </section>
+
+  <section id="response">
+    <h2>Формат ответа</h2>
+    <p>Успешный ответ возвращается с кодом <code>200</code> и типом
+      <code>application/json</code>.</p>
+    <table>
+      <thead>
+        <tr><th scope="col">Поле</th><th scope="col">Тип JSON</th><th scope="col">Значение</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row"><code>date_from</code>, <code>date_to</code></th><td>Строки</td><td>Запрошенные границы в формате <code>YYYY-MM-DD</code>. Для <code>date</code> обе границы равны этой дате.</td></tr>
+        <tr><th scope="row"><code>missing_dates</code></th><td>Массив строк</td><td>Запрошенные календарные даты, для которых в ответе нет снимков.</td></tr>
+        <tr><th scope="row"><code>snapshots</code></th><td>Массив объектов</td><td>Снимки, упорядоченные по дате и времени котировки. За день может быть несколько снимков.</td></tr>
+      </tbody>
+    </table>
+    <p>Каждый снимок содержит <code>curve_date</code> в формате <code>YYYY-MM-DD</code>
+      и <code>quote_time</code> в формате <code>HH:MM:SS</code> с возможной дробной частью
+      секунды. Смещение часового пояса отсутствует.</p>
+    <table>
+      <thead>
+        <tr><th scope="col">Общее поле точки</th><th scope="col">Тип JSON</th><th scope="col">Значение</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row"><code>tenor</code></th><td>Десятичная строка</td><td>Срок в годах. <code>"0.250000"</code> соответствует трём месяцам.</td></tr>
+        <tr><th scope="row"><code>yield_rate</code></th><td>Десятичная строка</td><td>Ставка в долях единицы. <code>"0.1406"</code> соответствует 14,06 %.</td></tr>
+        <tr><th scope="row"><code>etl_run_id</code></th><td>Строка UUID</td><td>Идентификатор запуска, записавшего точку. По нему можно найти запись в <code>etl_runs</code>.</td></tr>
+      </tbody>
+    </table>
+    <p>В десятичных строках используется точка. Точки в каждой кривой
+      отсортированы по возрастанию <code>tenor</code>.</p>
+  </section>
+
+  <section id="raw">
+    <h2><code>GET /curves/raw</code></h2>
+    <p>Снимок содержит массив <code>points</code> с исходными наблюдениями Мосбиржи.
+      Обычно в снимке 12 точек. Если для срока нет ставки, соответствующая точка
+      отсутствует.</p>
+    <h3>Пример ответа с одной показанной точкой</h3>
+    <pre><code id="raw-example">{
+  "date_from": "2026-10-30",
+  "date_to": "2026-10-30",
+  "missing_dates": [],
+  "snapshots": [
+    {
+      "curve_date": "2026-10-30",
+      "quote_time": "18:54:59",
+      "points": [
+        {
+          "tenor": "1.000000",
+          "yield_rate": "0.1406",
+          "etl_run_id": "e2bdcb6e-466f-4feb-883e-7547cf36130d"
+        }
+      ]
+    }
+  ]
+}</code></pre>
+  </section>
+
+  <section id="processed">
+    <h2><code>GET /curves/processed</code></h2>
+    <p>Снимок содержит массив <code>curves</code> с семью кривыми по 19 точек.
+      В каждой кривой есть <code>scenario</code>, <code>scenario_version</code>
+      и массив <code>points</code>.</p>
+    <p>Значения <code>scenario</code> в порядке выдачи — <code>Baseline</code>,
+      <code>Parallel_Up</code>, <code>Parallel_Down</code>, <code>Short_Up</code>,
+      <code>Short_Down</code>, <code>Steepener</code> и <code>Flattener</code>.</p>
+    <p>У <code>Baseline</code> поле <code>scenario_version</code> равно <code>null</code>.
+      Все шесть стресс-сценариев одного снимка имеют общую версию. Если запросить
+      данные без явной версии, для каждого снимка выбирается последний полный
+      набор по времени начала ETL.</p>
+    <table>
+      <thead>
+        <tr><th scope="col">Дополнительное поле точки</th><th scope="col">Тип JSON</th><th scope="col">Значение</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row"><code>discount_factor</code></th><td>Десятичная строка</td><td>Коэффициент дисконтирования по формуле <code>(1 + yield_rate)^(-tenor)</code>.</td></tr>
+        <tr><th scope="row"><code>is_interpolated</code></th><td>Логическое значение</td><td><code>true</code>, если базовая ставка в этой точке получена интерполяцией.</td></tr>
+        <tr><th scope="row"><code>is_extrapolated</code></th><td>Логическое значение</td><td><code>true</code>, если базовая ставка в этой точке получена экстраполяцией.</td></tr>
+      </tbody>
+    </table>
+    <h3>Сокращённый пример ответа с одной кривой и одной точкой</h3>
+    <pre><code id="processed-example">{
+  "date_from": "2026-10-30",
+  "date_to": "2026-10-30",
+  "missing_dates": [],
+  "snapshots": [
+    {
+      "curve_date": "2026-10-30",
+      "quote_time": "18:54:59",
+      "curves": [
+        {
+          "scenario": "Baseline",
+          "scenario_version": null,
+          "points": [
+            {
+              "tenor": "1.000000",
+              "yield_rate": "0.1406000000",
+              "etl_run_id": "e2bdcb6e-466f-4feb-883e-7547cf36130d",
+              "discount_factor": "0.876731544800981939",
+              "is_interpolated": false,
+              "is_extrapolated": false
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}</code></pre>
+  </section>
+
+  <section id="errors">
+    <h2>Загрузка и ошибки</h2>
+    <p>Если по запрошенным датам нет данных, оба эндпоинта запускают ETL и ждут
+      результата. Для <code>/curves/processed</code> дата без полного снимка
+      тоже считается пропущенной. При успешной загрузке ETL сохраняет исходные
+      и обработанные кривые даже при запросе к <code>/curves/raw</code>.</p>
+    <p>При отсутствии котировок API возвращает <code>200</code>, доступные снимки
+      и список оставшихся пропусков. Если весь диапазон пуст, <code>snapshots</code>
+      равен <code>[]</code>.</p>
+    <table>
+      <thead>
+        <tr><th scope="col">Код HTTP</th><th scope="col">Причина</th><th scope="col">Поле <code>detail</code></th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row"><code>404</code></th><td>Для дозагрузки <code>/curves/processed</code> не найдена полная калибровка указанной версии.</td><td>Строка.</td></tr>
+        <tr><th scope="row"><code>422</code></th><td>Ошибка формата или сочетания параметров либо версия сценариев не поддерживается расчётным слоем.</td><td>Массив ошибок при проверке формата параметров. Строка при проверке сочетания дат или версии.</td></tr>
+        <tr><th scope="row"><code>502</code></th><td>Загрузка или расчёт завершились ошибкой, и в ответе остались пропуски.</td><td>Объект с сообщением, запусками ETL с ошибками и отсутствующими датами.</td></tr>
+        <tr><th scope="row"><code>503</code></th><td>PostgreSQL недоступен или схема БД не обновлена.</td><td>Строка.</td></tr>
+        <tr><th scope="row"><code>504</code></th><td>Истекло время ожидания уже выполняющейся загрузки.</td><td>Строка.</td></tr>
+      </tbody>
+    </table>
+    <h3>Пример ответа HTTP 502</h3>
+    <pre><code id="gateway-error-example">{
+  "detail": {
+    "message": "Не удалось загрузить или рассчитать часть дат; подробности в etl_runs",
+    "runs": [
+      {
+        "etl_run_id": "e2bdcb6e-466f-4feb-883e-7547cf36130d",
+        "status": "failed",
+        "date_from": "2026-10-30",
+        "date_to": "2026-10-30"
+      }
+    ],
+    "missing_dates": ["2026-10-30"]
+  }
+}</code></pre>
+    <p>В <code>runs</code> возможны статусы <code>failed</code> и
+      <code>partial_success</code>. Успешно загруженные даты остаются в базе.
+      <code>/curves/raw</code> возвращает <code>200</code>, если для каждой
+      запрошенной даты есть исходный снимок, даже при сбое расчёта обработанных
+      кривых.</p>
+  </section>
+</main>
+</body>
+</html>
